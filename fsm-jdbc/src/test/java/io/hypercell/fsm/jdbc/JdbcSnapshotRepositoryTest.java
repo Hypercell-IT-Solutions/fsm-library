@@ -166,11 +166,4 @@ class JdbcSnapshotRepositoryTest {
         });
     }
 
-    @Test
-    void customTableName_usedInsteadOfDefault() {
-        SnapshotRepository customRepo = new JdbcSnapshotRepository(dataSource, new TestH2Dialect(), "custom_snaps");
-        ExecutionSnapshot snap = failedSnapshot("exec-custom");
-        customRepo.save("exec-custom", snap);
-        assertThat(customRepo.load("exec-custom")).isPresent();
-    }
 }

@@ -12,6 +12,11 @@ import io.hypercell.fsm.jdbc.SqlDialect;
 public class H2Dialect implements SqlDialect {
 
     @Override
+    public String id() {
+        return "h2";
+    }
+
+    @Override
     public String upsertSql(String tableName) {
         return String.format("""
                 INSERT INTO %1$s (

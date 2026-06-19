@@ -12,7 +12,7 @@ For Spring Boot applications, the `fsm-spring-boot-starter-jdbc` module provides
 <dependency>
     <groupId>net.hypercell</groupId>
     <artifactId>fsm-spring-boot-starter-jdbc</artifactId>
-    <version>1.0.0-RC1</version>
+    <version>1.0.0-RC2</version>
 </dependency>
 ```
 
@@ -105,7 +105,7 @@ public class OrderController {
 The `fsm-spring-boot-starter-jdbc` module provides:
 
 1. **`JdbcSnapshotRepository` bean** — automatically instantiated with Spring's `DataSource`
-2. **Schema creation** — tables are created automatically on startup (if they don't exist)
+2. **Versioned schema migration** — a Liquibase-style migration runner creates and upgrades the schema automatically on startup; two tracking tables (`fsm_schema_history`, `fsm_schema_lock`) record applied versions and guard against concurrent multi-replica migrations
 3. **Connection pooling** — uses Spring's configured `DataSource` (typically HikariCP)
 4. **No additional properties to set** — works with standard `spring.datasource.*` config
 
@@ -113,16 +113,14 @@ The `fsm-spring-boot-starter-jdbc` module provides:
 
 ## Multi-database support
 
-`JdbcSnapshotRepository` auto-detects your database and adapts SQL dialect accordingly. Tested and supported on:
+`JdbcSnapshotRepository` adapts its SQL dialect to the configured database. Set the dialect via `fsm.jdbc.dialect` (default: `postgresql`); the value selects the corresponding migration SQL files bundled in the `fsm-jdbc` jar (`io/hypercell/fsm/db/migrations/<dialect>/`). Tested and supported on:
 
-- **PostgreSQL** 12+
-- **MySQL** 8.0+
-- **MariaDB** 10.6+
-- **H2** 2.0+ (in-memory or file-based)
-- **SQLite** 3.40+
-- **Oracle** 21c+
-
-No configuration changes needed — the same code works across all databases.
+- **PostgreSQL** 12+ (`postgresql`)
+- **MySQL** 8.0+ (`mysql`)
+- **MariaDB** 10.6+ (`mysql`)
+- **H2** 2.0+ (`h2`, in-memory or file-based)
+- **SQLite** 3.40+ (`sqlite`)
+- **Oracle** 21c+ (`oracle`)
 
 ---
 
@@ -277,11 +275,11 @@ server.port=8080
 
 ---
 
-## Startup: schema creation and recovery
+## Startup: schema migration and recovery
 
 On application startup, the FSM library:
 
-1. **Creates the `fsm_execution_snapshot` table** (if it doesn't exist)
+1. **Runs the schema migration runner** — bootstraps the two tracking tables (`fsm_schema_history`, `fsm_schema_lock`), acquires a distributed DB lock, applies any not-yet-applied versioned migrations in order (currently V1: creates the `fsm_snapshots` table and its status index), verifies checksums of previously-applied migrations, and releases the lock. The migration is safe under concurrent multi-replica startup. See [Schema migrations](#schema-migrations) below for configuration options.
 2. **Calls `recoverPendingRetries()`** to resume any failed executions that are scheduled for retry
 
 Add this to your configuration:
@@ -300,6 +298,43 @@ public class OrderWorkflowStartupListener implements ApplicationListener<Context
     }
 }
 ```
+
+---
+
+### Schema migrations
+
+The migration runner is controlled by `fsm.jdbc.migration.*` properties:
+
+| Property | Default | Description |
+|---|---|---|
+| `fsm.jdbc.migration.mode` | `UPDATE` | `UPDATE` — apply pending migrations automatically at startup. `VALIDATE` — fail fast if the schema is behind; logs the full pending SQL for operators to run out-of-band. `OFF` — disable schema management entirely. |
+| `fsm.jdbc.migration.strict-checksum` | `false` | When `true`, a checksum mismatch on an already-applied migration causes a hard startup failure. When `false` (default), a warning is logged. |
+| `fsm.jdbc.migration.lock-ttl` | `5m` | How long the distributed migration lock is considered valid before being treated as stale and taken over by another node. |
+| `fsm.jdbc.migration.lock-wait-timeout` | `30s` | How long to wait for the migration lock before aborting startup with an error. |
+
+**Full `application.yml` example:**
+
+```yaml
+fsm:
+  jdbc:
+    enabled: true
+    dialect: postgresql          # postgresql (default), mysql, h2, sqlite, oracle
+    migration:
+      mode: UPDATE               # UPDATE (default), VALIDATE, or OFF
+      strict-checksum:  true     # fail on checksum mismatch (false: warn only)
+      lock-ttl: 5m               # stale-lock TTL (default: 5 minutes)
+      lock-wait-timeout: 30s     # how long to wait for the migration lock (default: 30s)
+```
+
+**Managing schema out-of-band (production teams that apply DDL themselves):**
+
+Set `mode: VALIDATE` to disable automatic DDL while still verifying the schema at startup — the runner fails fast if the database is behind and logs the exact pending SQL statements for you to apply. Set `mode: OFF` to skip schema management entirely and take full responsibility for keeping the schema in sync.
+
+The bundled per-dialect SQL files are located at `io/hypercell/fsm/db/migrations/<dialect>/` inside the `fsm-jdbc` jar (e.g. extract from the jar or view in source). Each dialect folder contains:
+- `bootstrap.sql` — creates `fsm_schema_history` and `fsm_schema_lock` and seeds the lock row
+- `V1__create_snapshots.sql` — creates the `fsm_snapshots` table and its status index
+
+You can apply these files directly with your database CLI, or feed them into an existing Flyway/Liquibase pipeline. `VALIDATE` mode is the recommended choice for production teams that apply DDL through a controlled change-management process: it guarantees the application will not start against a schema that is behind, without ever touching the database itself.
 
 ---
 

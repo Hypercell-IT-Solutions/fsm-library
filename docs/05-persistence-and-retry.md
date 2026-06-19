@@ -165,14 +165,14 @@ For production deployments across multiple JVMs, use `JdbcSnapshotRepository`. I
 <dependency>
     <groupId>net.hypercell</groupId>
     <artifactId>fsm-jdbc</artifactId>
-    <version>1.0.0-RC1</version>
+    <version>1.0.0-RC2</version>
 </dependency>
 ```
 
 **Setup:**
 ```java
 SnapshotRepository repo = new JdbcSnapshotRepository(dataSource);
-// Automatically creates schema on first use if it doesn't exist
+// Schema is managed by the versioned migration runner (UPDATE mode by default)
 
 StateMachineDefinition<OrderContext> definition = StateMachine.<OrderContext>define("order-workflow")
     .initial("PENDING")
@@ -185,33 +185,11 @@ StateMachineManager<OrderContext> manager = StateMachine.manager(definition, rep
 ```
 
 **Features:**
-- Automatic schema creation (first startup only)
+- Versioned schema migration runner applies the `fsm_snapshots` table and tracking tables automatically on startup (UPDATE mode, the default); see [JDBC & Spring Boot autoconfiguration](08-jdbc-and-spring-boot.md#schema-migrations) for `VALIDATE` and `OFF` modes
 - Optimistic locking via `version` column prevents conflicting updates from concurrent replicas
 - Sub-step results stored as JSON for portability across databases
 - Supports connection pooling (tested with HikariCP)
-- Composite key: execution snapshots keyed by `executionId` + `machineDefinitionId`
-
-**Database schema** (created automatically):
-```sql
-CREATE TABLE fsm_execution_snapshot (
-    execution_id VARCHAR(255),
-    machine_definition_id VARCHAR(255),
-    current_state_name VARCHAR(255),
-    failed_state_name VARCHAR(255),
-    failed_sub_step_name VARCHAR(255),
-    status VARCHAR(50),  -- FAILED, RETRY_SCHEDULED, RUNNING, COMPLETED
-    attempt_number INT,
-    completed_sub_steps JSON,
-    last_error_message TEXT,
-    last_error_type VARCHAR(255),
-    last_failed_at TIMESTAMP,
-    scheduled_retry_at TIMESTAMP,
-    version BIGINT,
-    created_at TIMESTAMP,
-    updated_at TIMESTAMP,
-    PRIMARY KEY (execution_id, machine_definition_id)
-);
-```
+- Snapshot keyed by `executionId`
 
 **Spring Boot integration** (optional): See [JDBC & Spring Boot autoconfiguration](08-jdbc-and-spring-boot.md).
 

@@ -42,21 +42,12 @@ class SqlDialectTest {
     }
 
     @Test
-    void oracleDialect_ddlUsesOracleTypes() {
-        List<String> ddl = new OracleDialect().ddlStatements("fsm_snapshots");
-        String createTable = ddl.get(0);
-        assertThat(createTable).containsIgnoringCase("VARCHAR2");
-        assertThat(createTable).containsIgnoringCase("CLOB");
-        assertThat(createTable).containsIgnoringCase("NUMBER");
-    }
-
-    @Test
-    void defaultDdlStatements_createsTwoStatements() {
-        List<String> ddl = new H2Dialect().ddlStatements("test_table");
-        assertThat(ddl).hasSize(2);
-        assertThat(ddl.get(0)).containsIgnoringCase("CREATE TABLE test_table");
-        assertThat(ddl.get(1)).containsIgnoringCase("CREATE INDEX");
-        assertThat(ddl.get(1)).contains("test_table");
+    void allDialects_haveStableId() {
+        assertThat(new H2Dialect().id()).isEqualTo("h2");
+        assertThat(new PostgreSqlDialect().id()).isEqualTo("postgresql");
+        assertThat(new MySqlDialect().id()).isEqualTo("mysql");
+        assertThat(new SqliteDialect().id()).isEqualTo("sqlite");
+        assertThat(new OracleDialect().id()).isEqualTo("oracle");
     }
 
     @Test

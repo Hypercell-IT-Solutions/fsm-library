@@ -3,6 +3,7 @@ package io.hypercell.fsm.spring;
 import io.hypercell.fsm.jdbc.JdbcSnapshotRepository;
 import io.hypercell.fsm.jdbc.SqlDialect;
 import io.hypercell.fsm.jdbc.dialect.*;
+import io.hypercell.fsm.jdbc.migration.SchemaMigrator;
 import io.hypercell.fsm.resume.SnapshotRepository;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
@@ -15,23 +16,31 @@ import javax.sql.DataSource;
 
 /**
  * Spring Boot autoconfiguration for FSM JDBC repository.
- * <p>
- * ENABLED BY DEFAULT. To disable:
+ *
+ * <p>ENABLED BY DEFAULT. To disable:
  * <pre>{@code
  * fsm.jdbc.enabled: false
  * }</pre>
- * <p>
- * CUSTOMIZATION:
+ *
+ * <p>CUSTOMIZATION:
  * <pre>{@code
- * fsm.jdbc.dialect: postgresql|mysql|h2|sqlite|oracle
- * fsm.jdbc.table-name: my_custom_table
+ * fsm:
+ *   jdbc:
+ *     dialect: postgresql|mysql|h2|sqlite|oracle
+ *     migration:
+ *       mode: UPDATE        # UPDATE (default), VALIDATE, or OFF
+ *       strict-checksum: false
+ *       lock-ttl: 5m
+ *       lock-wait-timeout: 30s
  * }</pre>
- * <p>
- * OPTIONALITY: If you don't add this starter:
- * - Define your own {@code @Bean SnapshotRepository} if needed
- * - Or use {@code StateMachine.inMemoryRepository()}/{@code StateMachine.fileRepository()} directly
- * <p>
- * PRECEDENCE: If a {@code SnapshotRepository} bean already exists (user-defined),
+ *
+ * <p>OPTIONALITY: If you don't add this starter:
+ * <ul>
+ *   <li>Define your own {@code @Bean SnapshotRepository} if needed</li>
+ *   <li>Or use {@code StateMachine.inMemoryRepository()}/{@code StateMachine.fileRepository()} directly</li>
+ * </ul>
+ *
+ * <p>PRECEDENCE: If a {@code SnapshotRepository} bean already exists (user-defined),
  * this autoconfiguration will not create one ({@code @ConditionalOnMissingBean}).
  */
 @AutoConfiguration
@@ -46,26 +55,35 @@ public class FsmJdbcAutoConfiguration {
 
     /**
      * Creates a {@link JdbcSnapshotRepository} bean if one doesn't already exist.
-     * <p>
-     * Uses the configured {@link FsmJdbcProperties} to select the SQL dialect and
-     * table name. The repository is initialized with an autoconfigured DataSource
-     * from Spring Boot's default configuration.
+     *
+     * <p>The repository is constructed with a {@link SchemaMigrator} built from the
+     * configured {@link FsmJdbcProperties.Migration} settings. The migrator runs
+     * <em>before</em> the repository is ready for use, ensuring the schema is in the
+     * expected state on every application startup.
      *
      * @param dataSource Spring Boot autoconfigured DataSource
-     * @param properties User configuration from application.yml
-     * @return a new JdbcSnapshotRepository, or skips if a bean already exists
+     * @param properties user configuration from application.yml / application.properties
+     * @return a new {@link JdbcSnapshotRepository}, or skips if a bean already exists
      */
     @Bean
     @ConditionalOnMissingBean(SnapshotRepository.class)
     public SnapshotRepository snapshotRepository(DataSource dataSource, FsmJdbcProperties properties) {
         SqlDialect dialect = selectDialect(properties.getDialect());
-        return new JdbcSnapshotRepository(dataSource, dialect, properties.getTableName());
+        FsmJdbcProperties.Migration migrationProps = properties.getMigration();
+        SchemaMigrator migrator = new SchemaMigrator(
+                dataSource,
+                dialect,
+                migrationProps.getMode(),
+                migrationProps.isStrictChecksum(),
+                migrationProps.getLockTtl(),
+                migrationProps.getLockWaitTimeout());
+        return new JdbcSnapshotRepository(dataSource, dialect, migrator);
     }
 
     /**
      * Select the appropriate {@link SqlDialect} based on configuration.
      *
-     * @param dialectName one of: PostgreSQL (default), mysql, h2, sqlite, oracle
+     * @param dialectName one of: postgresql (default), mysql, h2, sqlite, oracle
      * @return the corresponding dialect implementation
      * @throws IllegalArgumentException if the dialect is not recognized
      */

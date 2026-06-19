@@ -12,7 +12,7 @@ If you want a concepts primer first, read [Concepts](01-concepts.md).
 <dependency>
     <groupId>net.hypercell</groupId>
     <artifactId>fsm-core</artifactId>
-    <version>1.0.0-RC1</version>
+    <version>1.0.0-RC2</version>
 </dependency>
 ```
 

@@ -2,67 +2,19 @@ package io.hypercell.fsm.jdbc.dialect;
 
 import io.hypercell.fsm.jdbc.SqlDialect;
 
-import java.util.List;
-
 /**
  * {@link SqlDialect} for Oracle Database using {@code MERGE INTO ... USING (SELECT ... FROM DUAL)}.
  * Compatible with Oracle 9i+.
- * <p>
- * ORACLE SCHEMA DIFFERENCES:
- * The standard {@code schema.sql} does not work on Oracle as-is. Adjust the DDL as follows:
- * <ul>
- *   <li>{@code TEXT} → {@code CLOB}</li>
- *   <li>{@code BIGINT} → {@code NUMBER(19)}</li>
- *   <li>{@code VARCHAR(n)} → {@code VARCHAR2(n)}</li>
- *   <li>{@code CREATE INDEX IF NOT EXISTS} → {@code CREATE INDEX} (Oracle does not support
- *       {@code IF NOT EXISTS} on index creation)</li>
- * </ul>
- * Example Oracle-compatible schema:
- * <pre>{@code
- * CREATE TABLE fsm_snapshots (
- *     execution_id          VARCHAR2(255)  NOT NULL,
- *     machine_definition_id VARCHAR2(255)  NOT NULL,
- *     current_state_name    VARCHAR2(255),
- *     failed_state_name     VARCHAR2(255),
- *     failed_sub_step_name  VARCHAR2(255),
- *     last_trigger_event    VARCHAR2(255),
- *     attempt_number        NUMBER(10)     DEFAULT 1 NOT NULL,
- *     last_failed_at        VARCHAR2(50),
- *     scheduled_retry_at    VARCHAR2(50),
- *     captured_at           VARCHAR2(50)   NOT NULL,
- *     last_error_message    CLOB,
- *     status                VARCHAR2(50)   NOT NULL,
- *     completed_steps       CLOB,
- *     version               NUMBER(19)     DEFAULT 1 NOT NULL,
- *     CONSTRAINT pk_fsm_snapshots PRIMARY KEY (execution_id)
- * );
- * CREATE INDEX idx_fsm_snapshots_status ON fsm_snapshots (status);
- * }</pre>
+ *
+ * <p>Oracle-specific schema differences (VARCHAR2, CLOB, NUMBER) are handled in the
+ * per-dialect migration files under
+ * {@code io/hypercell/fsm/db/migrations/oracle/} rather than in this class.
  */
 public class OracleDialect implements SqlDialect {
 
     @Override
-    public List<String> ddlStatements(String tableName) {
-        return List.of(
-                "CREATE TABLE " + tableName + " ("
-                        + "    execution_id          VARCHAR2(255) NOT NULL,"
-                        + "    machine_definition_id VARCHAR2(255) NOT NULL,"
-                        + "    current_state_name    VARCHAR2(255),"
-                        + "    failed_state_name     VARCHAR2(255),"
-                        + "    failed_sub_step_name  VARCHAR2(255),"
-                        + "    last_trigger_event    VARCHAR2(255),"
-                        + "    attempt_number        NUMBER(10)    DEFAULT 1 NOT NULL,"
-                        + "    last_failed_at        VARCHAR2(50),"
-                        + "    scheduled_retry_at    VARCHAR2(50),"
-                        + "    captured_at           VARCHAR2(50)  NOT NULL,"
-                        + "    last_error_message    CLOB,"
-                        + "    status                VARCHAR2(50)  NOT NULL,"
-                        + "    completed_steps       CLOB,"
-                        + "    version               NUMBER(19)    DEFAULT 1 NOT NULL,"
-                        + "    CONSTRAINT pk_" + tableName + " PRIMARY KEY (execution_id)"
-                        + ")",
-                "CREATE INDEX idx_" + tableName + "_status ON " + tableName + " (status)"
-        );
+    public String id() {
+        return "oracle";
     }
 
     @Override
