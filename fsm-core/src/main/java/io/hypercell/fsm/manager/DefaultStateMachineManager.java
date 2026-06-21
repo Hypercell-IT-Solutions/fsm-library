@@ -4,11 +4,7 @@ import io.hypercell.fsm.core.ContextLoader;
 import io.hypercell.fsm.core.ExecutionStatus;
 import io.hypercell.fsm.core.StateMachineDefinition;
 import io.hypercell.fsm.core.StateMachineInstance;
-import io.hypercell.fsm.exception.CompletedMachineException;
-import io.hypercell.fsm.exception.ConcurrentExecutionException;
-import io.hypercell.fsm.exception.IllegalTriggerStateException;
-import io.hypercell.fsm.exception.StateMachineException;
-import io.hypercell.fsm.exception.SubStepExecutionException;
+import io.hypercell.fsm.exception.*;
 import io.hypercell.fsm.resume.ExecutionSnapshot;
 import io.hypercell.fsm.resume.SnapshotRepository;
 import io.hypercell.fsm.resume.SnapshotStatus;
@@ -19,10 +15,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 import java.util.concurrent.locks.ReentrantLock;
 
 /**
@@ -156,6 +149,42 @@ public class DefaultStateMachineManager<C> implements StateMachineManager<C> {
     }
 
     @Override
+    public void recoverPendingRetries() {
+        if (definition.retryCoordinator() == null) {
+            return;
+        }
+
+        List<ExecutionSnapshot> pending = repository.listPendingRetries();
+
+        for (ExecutionSnapshot snapshot : pending) {
+            boolean shouldRecover = (snapshot.getStatus() == SnapshotStatus.RETRY_SCHEDULED || snapshot.getStatus() == SnapshotStatus.FAILED)
+                    && definition.retryCoordinator().getRetryPolicy().shouldRetry(snapshot.getAttemptNumber(), null);
+
+            if (!shouldRecover) continue;
+
+            Duration delay = Duration.ZERO;
+            if (snapshot.getScheduledRetryAt() != null) {
+                Duration remaining = Duration.between(
+                        Instant.now(), snapshot.getScheduledRetryAt());
+                if (!remaining.isNegative()) {
+                    delay = remaining;
+                }
+            }
+
+            String executionId = snapshot.getExecutionId();
+            long delayMs = delay.toMillis();
+
+            recoveryExecutor.schedule(() -> {
+                try {
+                    proceed(executionId);
+                } catch (Exception e) {
+                    log.warn("Recovery retry failed for '{}': {}", executionId, e.getMessage());
+                }
+            }, delayMs, TimeUnit.MILLISECONDS);
+        }
+    }
+
+    @Override
     public ManagedTransitionResult<C> resume(String executionId) {
         ReentrantLock lock = acquireLock(executionId);
         try {
@@ -244,7 +273,7 @@ public class DefaultStateMachineManager<C> implements StateMachineManager<C> {
      */
     @Override
     public int recoverInterruptedExecutions() {
-        java.util.concurrent.ExecutorService executor = definition.recoveryExecutor();
+        ExecutorService executor = definition.recoveryExecutor();
         if (executor == null) {
             throw new IllegalStateException(
                     "recoverInterruptedExecutions requires a recoveryExecutor; configure one on "
@@ -280,39 +309,72 @@ public class DefaultStateMachineManager<C> implements StateMachineManager<C> {
         return toBeRecovered;
     }
 
+    /**
+     * Retry all {@code FAILED} executions with {@code attempt_number < maxAttempts}
+     * in parallel via the consumer-supplied executor.
+     * <p>
+     * Mirrors the structure of {@link #recoverInterruptedExecutions()}.
+     */
     @Override
-    public void recoverPendingRetries() {
-        if (definition.retryCoordinator() == null) {
-            return;
+    public int recoverFailedExecutions(int maxAttempts) {
+        ExecutorService executor = definition.recoveryExecutor();
+        if (executor == null) {
+            throw new IllegalStateException(
+                    "recoverFailedExecutions requires a recoveryExecutor; configure one on "
+                            + "the builder via .recoveryExecutor(executor), or use proceed(executionId) "
+                            + "per execution");
+        }
+        if (maxAttempts <= 0) {
+            throw new IllegalArgumentException("maxAttempts must be > 0, got " + maxAttempts);
         }
 
-        List<ExecutionSnapshot> pending = repository.listPendingRetries();
-
-        for (ExecutionSnapshot snapshot : pending) {
-            boolean shouldRecover = (snapshot.getStatus() == SnapshotStatus.RETRY_SCHEDULED || snapshot.getStatus() == SnapshotStatus.FAILED)
-                    && definition.retryCoordinator().getRetryPolicy().shouldRetry(snapshot.getAttemptNumber(), null);
-
-            if (!shouldRecover) continue;
-
-            Duration delay = Duration.ZERO;
-            if (snapshot.getScheduledRetryAt() != null) {
-                Duration remaining = Duration.between(
-                        Instant.now(), snapshot.getScheduledRetryAt());
-                if (!remaining.isNegative()) {
-                    delay = remaining;
-                }
+        final int PAGE = definition.recoveryPageSize();
+        int submitted = 0;
+        String lastId = null;
+        List<ExecutionSnapshot> page;
+        do {
+            page = repository.listFailed(PAGE, lastId, maxAttempts);
+            if (page.isEmpty()) break;
+            for (ExecutionSnapshot s : page) {
+                executor.submit(() -> retryFailedOnce(s.getExecutionId(), maxAttempts));
             }
+            submitted += page.size();
+            lastId = page.get(page.size() - 1).getExecutionId();
+        } while (page.size() == PAGE);
 
-            String executionId = snapshot.getExecutionId();
-            long delayMs = delay.toMillis();
+        return submitted;
+    }
 
-            recoveryExecutor.schedule(() -> {
-                try {
-                    proceed(executionId);
-                } catch (Exception e) {
-                    log.warn("Recovery retry failed for '{}': {}", executionId, e.getMessage());
-                }
-            }, delayMs, TimeUnit.MILLISECONDS);
+    /**
+     * Per-execution task submitted by {@link #recoverFailedExecutions(int)}.
+     * <p>
+     * Acquires the per-execution lock, re-validates that the snapshot is still FAILED
+     * with {@code attempt_number < maxAttempts} (state may have changed since the page
+     * was read), bumps {@code attempt_number} by 1, then calls {@link #doProceed} directly
+     * under the held lock (doProceed does not itself acquire the lock — only the public
+     * {@link #proceed(String)} wrapper does — so this is safe and avoids re-entrancy).
+     * Exceptions are caught and logged per-execution; releaseLock runs in finally.
+     */
+    private void retryFailedOnce(String executionId, int maxAttempts) {
+        ReentrantLock lock = acquireLock(executionId);
+        try {
+            Optional<ExecutionSnapshot> opt = repository.load(executionId);
+            if (opt.isEmpty()) return;
+            ExecutionSnapshot snap = opt.get();
+            if (!snap.isFailed() || snap.getAttemptNumber() >= maxAttempts) return;
+
+            repository.save(executionId, snap.withAttemptNumber(snap.getAttemptNumber() + 1));
+
+            var result = doProceed(executionId, null);
+            if (result.isFailed()) {
+                log.error("[recoverFailedExecutions] Failed to retry '{}': {}",
+                        executionId, result.getRootCause().getMessage(), result.getRootCause());
+            }
+        } catch (Exception e) {
+            log.error("[recoverFailedExecutions] Failed to retry '{}': {}",
+                    executionId, e.getMessage(), e);
+        } finally {
+            releaseLock(executionId, lock);
         }
     }
 

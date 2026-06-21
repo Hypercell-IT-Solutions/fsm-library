@@ -307,7 +307,7 @@ server.port=8080
 
 On application startup, the FSM library:
 
-1. **Runs the schema migration runner** — bootstraps the two tracking tables (`fsm_schema_history`, `fsm_schema_lock`), acquires a distributed DB lock, applies any not-yet-applied versioned migrations in order (currently V1: creates the `fsm_snapshots` table and its status index), verifies checksums of previously-applied migrations, and releases the lock. The migration is safe under concurrent multi-replica startup. See [Schema migrations](#schema-migrations) below for configuration options.
+1. **Runs the schema migration runner** — bootstraps the two tracking tables (`fsm_schema_history`, `fsm_schema_lock`), acquires a distributed DB lock, applies any not-yet-applied versioned migrations in order (V1: creates the `fsm_snapshots` table and its status index; V2: adds the composite `(status, attempt_number)` index for the failed-execution sweep), verifies checksums of previously-applied migrations, and releases the lock. The migration is safe under concurrent multi-replica startup. See [Schema migrations](#schema-migrations) below for configuration options.
 2. **Calls `recoverPendingRetries()`** to resume any failed executions that are scheduled for retry.
 3. *(Optional, single-instance only)* **Calls `recoverInterruptedExecutions()`** to complete executions whose process crashed mid-transition.
 
@@ -322,7 +322,7 @@ public class OrderWorkflowStartupListener implements ApplicationListener<Context
 
     @Override
     public void onApplicationEvent(ContextRefreshedEvent event) {
-        // Reschedule FAILED/RETRY_SCHEDULED retries
+        // Reschedule FAILED/RETRY_SCHEDULED retries (in-process coordinator path)
         manager.recoverPendingRetries();
 
         // Resume executions interrupted by a crash mid-sub-step.
@@ -332,6 +332,11 @@ public class OrderWorkflowStartupListener implements ApplicationListener<Context
         if (submitted > 0) {
             log.info("Submitted {} interrupted executions for recovery", submitted);
         }
+
+        // For consumer-driven FAILED retry (no coordinator required):
+        // Call recoverFailedExecutions(maxAttempts) from a leader-elected scheduler or
+        // a single designated node.  Do NOT call from every replica.
+        // int failedSubmitted = manager.recoverFailedExecutions(5);
     }
 }
 ```
@@ -378,6 +383,28 @@ public StateMachineDefinition<OrderContext> orderWorkflow(
 
 `listInterrupted()` in `JdbcSnapshotRepository` executes `SELECT … WHERE status = 'RUNNING' AND execution_id > ? ORDER BY execution_id LIMIT ?` — a keyset-paginated, indexed scan that returns only genuinely interrupted rows. No additional column or index is needed beyond the existing `status` index created by V1.
 
+#### Consumer-driven FAILED retry: `recoverFailedExecutions(maxAttempts)`
+
+`recoverFailedExecutions(int maxAttempts)` retries all `FAILED` executions with `attempt_number < maxAttempts` in parallel via the consumer-supplied `recoveryExecutor`. It is the distributed-safe alternative to the in-process coordinator path — no `RetryCoordinator` is required.
+
+- **Scope: `FAILED` only.** Do **not** run this sweep and an auto-retry coordinator on the same definition — with a coordinator, `FAILED` means "policy exhausted", and the sweep would override that decision.
+- **Bounded by `maxAttempts`.** Only rows with `attempt_number < maxAttempts` are fetched; exhausted rows stop being returned naturally.
+- **Attempt-number semantics.** Each sweep invocation that retries an execution increments its `attempt_number` by exactly 1 before calling `proceed()`. Generic `proceed()` does not increment this counter.
+- **Requires** a `recoveryExecutor` on the definition; throws `IllegalStateException` if none is configured. `maxAttempts` must be `> 0`.
+- **Async — returns submitted count.** Tasks are submitted immediately; the returned count may include in-flight executions.
+- **Single-instance or leader-election for distributed deployments.** Do not call from every replica.
+
+```java
+// Example: leader-elected Spring scheduled task
+@Scheduled(cron = "0 */5 * * * *")   // every 5 minutes
+public void sweepFailedExecutions() {
+    int submitted = manager.recoverFailedExecutions(5);
+    log.info("Failed-execution sweep submitted {} retries", submitted);
+}
+```
+
+The V2 migration adds a composite index on `(status, attempt_number)` to accelerate the sweep query `WHERE status = 'FAILED' AND attempt_number < ?`.
+
 ---
 
 ### Schema migrations
@@ -411,7 +438,8 @@ Set `mode: VALIDATE` to disable automatic DDL while still verifying the schema a
 
 The bundled per-dialect SQL files are located at `io/hypercell/fsm/db/migrations/<dialect>/` inside the `fsm-jdbc` jar (e.g. extract from the jar or view in source). Each dialect folder contains:
 - `bootstrap.sql` — creates `fsm_schema_history` and `fsm_schema_lock` and seeds the lock row
-- `V1__create_snapshots.sql` — creates the `fsm_snapshots` table and its status index
+- `V1__create_snapshots.sql` — creates the `fsm_snapshots` table and its `status` index
+- `V2__add_attempt_number_index.sql` — adds the composite `(status, attempt_number)` index for the `recoverFailedExecutions` sweep
 
 You can apply these files directly with your database CLI, or feed them into an existing Flyway/Liquibase pipeline. `VALIDATE` mode is the recommended choice for production teams that apply DDL through a controlled change-management process: it guarantees the application will not start against a schema that is behind, without ever touching the database itself.
 

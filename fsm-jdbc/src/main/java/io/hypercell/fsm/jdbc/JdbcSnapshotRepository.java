@@ -212,6 +212,51 @@ public class JdbcSnapshotRepository implements SnapshotRepository {
         }
     }
 
+    /**
+     * Return a keyset-paginated page of failed executions eligible for a consumer-driven
+     * retry sweep (status = {@code FAILED} and {@code attempt_number < maxAttempts}).
+     * <p>
+     * SQL (first page): {@code WHERE status = 'FAILED' AND attempt_number < ?
+     * ORDER BY execution_id <limitClause>}
+     * <p>
+     * SQL (keyset page): {@code WHERE status = 'FAILED' AND attempt_number < ?
+     * AND execution_id > ? ORDER BY execution_id <limitClause>}
+     * <p>
+     * The row-limiting clause is dialect-specific via {@link SqlDialect#limitClause(int)}.
+     */
+    @Override
+    public List<ExecutionSnapshot> listFailed(int limit, String afterExecutionId, int maxAttempts) {
+        String limitClause = dialect.limitClause(limit);
+        String sql;
+        if (afterExecutionId == null) {
+            sql = "SELECT " + SELECT_COLUMNS + " FROM " + DEFAULT_TABLE
+                    + " WHERE status = 'FAILED' AND attempt_number < ?"
+                    + " ORDER BY execution_id"
+                    + " " + limitClause;
+        } else {
+            sql = "SELECT " + SELECT_COLUMNS + " FROM " + DEFAULT_TABLE
+                    + " WHERE status = 'FAILED' AND attempt_number < ? AND execution_id > ?"
+                    + " ORDER BY execution_id"
+                    + " " + limitClause;
+        }
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setInt(1, maxAttempts);
+            if (afterExecutionId != null) {
+                ps.setString(2, afterExecutionId);
+            }
+            try (ResultSet rs = ps.executeQuery()) {
+                List<ExecutionSnapshot> results = new ArrayList<>();
+                while (rs.next()) {
+                    results.add(toSnapshot(rs));
+                }
+                return results;
+            }
+        } catch (SQLException e) {
+            throw new SnapshotException("Failed to list failed executions", e);
+        }
+    }
+
     private static void bind(PreparedStatement ps, ExecutionSnapshot s) throws SQLException {
         ps.setString(1, s.getExecutionId());
         ps.setString(2, s.getMachineDefinitionId());
