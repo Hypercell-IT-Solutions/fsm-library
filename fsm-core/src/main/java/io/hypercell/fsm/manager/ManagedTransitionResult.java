@@ -3,11 +3,11 @@ package io.hypercell.fsm.manager;
 import io.hypercell.fsm.core.ExecutionStatus;
 
 /**
- * The result of a StateMachineManager.trigger() or proceed() call.
+ * The result of a {@link StateMachineManager#trigger(String, String)},
+ * {@link StateMachineManager#proceed(String)}, or {@link StateMachineManager#resume(String)} call.
  * <p>
  * Contains everything the HTTP endpoint needs to build a response:
- * the new state, the overall status, and whether a prior failure was
- * auto-retried before the event was applied.
+ * the new state, the overall status, and — on failure — which sub-step failed and the root cause.
  *
  * @param <C> the context type (carried for type safety, not always populated)
  */
@@ -17,13 +17,6 @@ public final class ManagedTransitionResult<C> {
     private final String fromState;
     private final String toState;
     private final ExecutionStatus executionStatus;
-
-    /**
-     * True when the manager found a FAILED snapshot and auto-proceeded
-     * (retried the failed sub-steps) before applying the incoming event.
-     * Useful for logging or responding with extra context to the caller.
-     */
-    private final boolean proceededFromFailure;
 
     /**
      * Non-null only when executionStatus == FAILED.
@@ -53,7 +46,6 @@ public final class ManagedTransitionResult<C> {
         this.fromState = b.fromState;
         this.toState = b.toState;
         this.executionStatus = b.executionStatus;
-        this.proceededFromFailure = b.proceededFromFailure;
         this.failedSubStepName = b.failedSubStepName;
         this.failedStateName = b.failedStateName;
         this.rootCause = b.rootCause;
@@ -82,19 +74,10 @@ public final class ManagedTransitionResult<C> {
     }
 
     /**
-     * Overall lifecycle status after this operation: {@code RUNNING}, {@code COMPLETED}, or {@code FAILED}.
+     * Overall lifecycle status after this operation: {@code RUNNING}, {@code TERMINATED}, or {@code FAILED}.
      */
     public ExecutionStatus getExecutionStatus() {
         return executionStatus;
-    }
-
-    /**
-     * {@code true} when the manager found a {@code FAILED} snapshot and automatically called
-     * {@code proceed()} to retry the failed sub-steps before applying the incoming event.
-     * Useful for logging or surfacing extra context in HTTP responses.
-     */
-    public boolean isProceededFromFailure() {
-        return proceededFromFailure;
     }
 
     /**
@@ -144,8 +127,8 @@ public final class ManagedTransitionResult<C> {
     /**
      * {@code true} when the execution reached a terminal state.
      */
-    public boolean isCompleted() {
-        return executionStatus == ExecutionStatus.COMPLETED;
+    public boolean isTerminated() {
+        return executionStatus == ExecutionStatus.TERMINATED;
     }
 
     /**
@@ -168,7 +151,6 @@ public final class ManagedTransitionResult<C> {
                 "executionId='" + executionId + '\'' +
                 ", " + fromState + " → " + toState +
                 ", status=" + executionStatus +
-                (proceededFromFailure ? ", proceededFromFailure=true" : "") +
                 (failedSubStepName != null ? ", failedAt=" + failedStateName + "/" + failedSubStepName : "") +
                 '}';
     }
@@ -188,7 +170,6 @@ public final class ManagedTransitionResult<C> {
         private String fromState;
         private String toState;
         private ExecutionStatus executionStatus;
-        private boolean proceededFromFailure = false;
         private String failedSubStepName;
         private String failedStateName;
         private Throwable rootCause;
@@ -211,11 +192,6 @@ public final class ManagedTransitionResult<C> {
 
         public Builder<C> executionStatus(ExecutionStatus v) {
             executionStatus = v;
-            return this;
-        }
-
-        public Builder<C> proceededFromFailure(boolean v) {
-            proceededFromFailure = v;
             return this;
         }
 

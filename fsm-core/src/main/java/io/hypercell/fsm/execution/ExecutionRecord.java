@@ -73,8 +73,8 @@ public class ExecutionRecord {
         this.status = ExecutionStatus.FAILED;
     }
 
-    public void markCompleted() {
-        this.status = ExecutionStatus.COMPLETED;
+    public void markTerminated() {
+        this.status = ExecutionStatus.TERMINATED;
         this.failedStateName = null;
         this.failedSubStepName = null;
     }

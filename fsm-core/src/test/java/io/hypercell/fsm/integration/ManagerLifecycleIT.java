@@ -70,11 +70,11 @@ class ManagerLifecycleIT {
 
         ManagedTransitionResult<OrderContext> completeResult = manager.trigger("order-1", "COMPLETE");
         assertThat(completeResult.getToState()).isEqualTo("SHIPPED");
-        assertThat(completeResult.getExecutionStatus()).isEqualTo(ExecutionStatus.COMPLETED);
-        assertThat(completeResult.isCompleted()).isTrue();
+        assertThat(completeResult.getExecutionStatus()).isEqualTo(ExecutionStatus.TERMINATED);
+        assertThat(completeResult.isTerminated()).isTrue();
 
         assertThat(repo.load("order-1")).isPresent()
-                .hasValueSatisfying(s -> assertThat(s.getStatus()).isEqualTo(SnapshotStatus.COMPLETED));
+                .hasValueSatisfying(s -> assertThat(s.getStatus()).isEqualTo(SnapshotStatus.TERMINATED));
     }
 
     @Test
@@ -109,7 +109,7 @@ class ManagerLifecycleIT {
 
         ManagedTransitionResult<OrderContext> r3 = failManager.trigger("exec-1", "GO");
         assertThat(r3.getToState()).isEqualTo("DONE");
-        assertThat(r3.getExecutionStatus()).isEqualTo(ExecutionStatus.COMPLETED);
+        assertThat(r3.getExecutionStatus()).isEqualTo(ExecutionStatus.TERMINATED);
     }
 
     @Test

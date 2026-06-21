@@ -18,7 +18,6 @@ import io.hypercell.fsm.retry.RetryScheduler;
 import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.*;
-import java.util.function.Function;
 
 /**
  * Fluent builder for state machine definitions.
@@ -52,6 +51,8 @@ public class StateMachineBuilder<C> {
     private RetryPolicy retryPolicy = NoAutoRetryPolicy.INSTANCE;
     private RetryScheduler retryScheduler = null;
     private ContextLoader<C> contextLoader = null;
+    private ExecutorService recoveryExecutor = null;
+    private int recoveryPageSize = DefaultStateMachineDefinition.DEFAULT_RECOVERY_PAGE_SIZE;
 
     public StateMachineBuilder(String id) {
         this.id = id;
@@ -127,6 +128,40 @@ public class StateMachineBuilder<C> {
      */
     public StateMachineBuilder<C> resumePolicy(ResumePolicy<C> p) {
         resumePolicy = p;
+        return this;
+    }
+
+    /**
+     * Set the executor used by
+     * {@link io.hypercell.fsm.manager.StateMachineManager#recoverInterruptedExecutions()}
+     * to resume interrupted executions in parallel.
+     * <p>
+     * If not configured, {@code recoverInterruptedExecutions()} throws
+     * {@link IllegalStateException}. Use {@link java.util.concurrent.Executors} to create a
+     * suitable pool (e.g. {@code Executors.newFixedThreadPool(4)}). The consumer owns the
+     * executor's lifecycle — the library never shuts it down.
+     * <p>
+     * {@link io.hypercell.fsm.manager.StateMachineManager#resume(String)} and lazy resume
+     * via {@code trigger()} do NOT require this executor and work with no configuration.
+     */
+    public StateMachineBuilder<C> recoveryExecutor(ExecutorService executor) {
+        recoveryExecutor = executor;
+        return this;
+    }
+
+    /**
+     * Page size used by
+     * {@link io.hypercell.fsm.manager.StateMachineManager#recoverInterruptedExecutions()} when
+     * keyset-paginating interrupted executions from the repository. Defaults to {@code 100}.
+     *
+     * @param pageSize the page size; must be {@code > 0}
+     * @throws IllegalArgumentException if {@code pageSize <= 0}
+     */
+    public StateMachineBuilder<C> recoveryPageSize(int pageSize) {
+        if (pageSize <= 0) {
+            throw new IllegalArgumentException("recoveryPageSize must be > 0, got " + pageSize);
+        }
+        recoveryPageSize = pageSize;
         return this;
     }
 
@@ -221,7 +256,8 @@ public class StateMachineBuilder<C> {
 
         DefaultStateMachineDefinition<C> def = new DefaultStateMachineDefinition<>(
                 id, stateMap.get(initialStateName), stateMap, transitionMap,
-                resumePolicy, snapshotRepository, coordinator, bus, contextLoader);
+                resumePolicy, snapshotRepository, coordinator, bus, contextLoader, recoveryExecutor,
+                recoveryPageSize);
         ref.set(def);
         return def;
     }
@@ -281,6 +317,16 @@ public class StateMachineBuilder<C> {
         @Override
         public ContextLoader<C> contextLoader() {
             return d.contextLoader();
+        }
+
+        @Override
+        public ExecutorService recoveryExecutor() {
+            return d.recoveryExecutor();
+        }
+
+        @Override
+        public int recoveryPageSize() {
+            return d.recoveryPageSize();
         }
 
         @Override

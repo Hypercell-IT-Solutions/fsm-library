@@ -76,6 +76,7 @@ public class JdbcSnapshotRepository implements SnapshotRepository {
             """;
 
     private final DataSource dataSource;
+    private final SqlDialect dialect;
 
     private final String selectSql;
     private final String deleteSql;
@@ -108,6 +109,7 @@ public class JdbcSnapshotRepository implements SnapshotRepository {
                                   SqlDialect dialect,
                                   SchemaMigrator schemaMigrator) {
         this.dataSource = dataSource;
+        this.dialect = dialect;
         this.selectSql = "SELECT " + SELECT_COLUMNS + " FROM " + DEFAULT_TABLE + " WHERE execution_id = ?";
         this.deleteSql = "DELETE FROM " + DEFAULT_TABLE + " WHERE execution_id = ?";
         this.listPendingSql = "SELECT " + SELECT_COLUMNS + " FROM " + DEFAULT_TABLE
@@ -164,6 +166,49 @@ public class JdbcSnapshotRepository implements SnapshotRepository {
             return results;
         } catch (SQLException e) {
             throw new SnapshotException("Failed to list pending retries", e);
+        }
+    }
+
+    /**
+     * Return a keyset-paginated page of interrupted executions (status = {@code RUNNING}).
+     * <p>
+     * SQL: {@code WHERE status = 'RUNNING' AND (? IS NULL OR execution_id > ?)
+     * ORDER BY execution_id LIMIT ?}
+     * <p>
+     * The first-page call passes {@code afterExecutionId = null}; subsequent pages pass the
+     * last execution ID seen. The row-limiting clause is dialect-specific via
+     * {@link SqlDialect#limitClause(int)} ({@code LIMIT n} for PostgreSQL/MySQL/H2/SQLite,
+     * {@code FETCH FIRST n ROWS ONLY} for Oracle).
+     */
+    @Override
+    public List<ExecutionSnapshot> listInterrupted(int limit, String afterExecutionId) {
+        String limitClause = dialect.limitClause(limit);
+        String sql;
+        if (afterExecutionId == null) {
+            sql = "SELECT " + SELECT_COLUMNS + " FROM " + DEFAULT_TABLE
+                    + " WHERE status = 'RUNNING'"
+                    + " ORDER BY execution_id"
+                    + " " + limitClause;
+        } else {
+            sql = "SELECT " + SELECT_COLUMNS + " FROM " + DEFAULT_TABLE
+                    + " WHERE status = 'RUNNING' AND execution_id > ?"
+                    + " ORDER BY execution_id"
+                    + " " + limitClause;
+        }
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            if (afterExecutionId != null) {
+                ps.setString(1, afterExecutionId);
+            }
+            try (ResultSet rs = ps.executeQuery()) {
+                List<ExecutionSnapshot> results = new ArrayList<>();
+                while (rs.next()) {
+                    results.add(toSnapshot(rs));
+                }
+                return results;
+            }
+        } catch (SQLException e) {
+            throw new SnapshotException("Failed to list interrupted executions", e);
         }
     }
 

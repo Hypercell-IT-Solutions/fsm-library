@@ -4,8 +4,10 @@ import io.hypercell.fsm.StateMachine;
 import io.hypercell.fsm.core.ActionResult;
 import io.hypercell.fsm.core.ExecutionStatus;
 import io.hypercell.fsm.core.StateMachineDefinition;
+import io.hypercell.fsm.exception.IllegalTriggerStateException;
 import io.hypercell.fsm.manager.ManagedTransitionResult;
 import io.hypercell.fsm.manager.StateMachineManager;
+import io.hypercell.fsm.manager.TriggerEligibility;
 import io.hypercell.fsm.resume.SnapshotStatus;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -16,6 +18,7 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Verifies that JdbcSnapshotRepository works end-to-end with the FSM manager over H2.
@@ -78,14 +81,14 @@ class JdbcManagerWorkflowIT {
 
         ManagedTransitionResult<OrderCtx> result = manager2.trigger("order-1", "COMPLETE");
         assertThat(result.getToState()).isEqualTo("SHIPPED");
-        assertThat(result.getExecutionStatus()).isEqualTo(ExecutionStatus.COMPLETED);
+        assertThat(result.getExecutionStatus()).isEqualTo(ExecutionStatus.TERMINATED);
 
         assertThat(repo2.load("order-1")).isPresent()
-                .hasValueSatisfying(s -> assertThat(s.getStatus()).isEqualTo(SnapshotStatus.COMPLETED));
+                .hasValueSatisfying(s -> assertThat(s.getStatus()).isEqualTo(SnapshotStatus.TERMINATED));
     }
 
     @Test
-    void failureRecovery_withJdbc_persistsFailureAndRetry() {
+    void failureRecovery_withJdbc_strictTrigger_requiresExplicitProceed() {
         AtomicBoolean shouldFail = new AtomicBoolean(true);
 
         JdbcSnapshotRepository repo = new JdbcSnapshotRepository(sharedDataSource, new TestH2Dialect());
@@ -112,9 +115,23 @@ class JdbcManagerWorkflowIT {
         assertThat(repo.load("exec-f")).isPresent()
                 .hasValueSatisfying(s -> assertThat(s.getStatus()).isEqualTo(SnapshotStatus.FAILED));
 
-        ManagedTransitionResult<OrderCtx> r2 = manager.trigger("exec-f", "GO");
-        assertThat(r2.isProceededFromFailure()).isTrue();
-        assertThat(r2.getToState()).isEqualTo("DONE");
-        assertThat(r2.getExecutionStatus()).isEqualTo(ExecutionStatus.COMPLETED);
+        assertThatThrownBy(() -> manager.trigger("exec-f", "GO"))
+                .isInstanceOf(IllegalTriggerStateException.class)
+                .hasMessageContaining("FAILED")
+                .hasMessageContaining("proceed()");
+
+        assertThat(manager.eligibilityOf("exec-f")).isEqualTo(TriggerEligibility.NEEDS_PROCEED);
+
+        // Explicit recover-then-trigger: proceed() retries failed sub-step
+        ManagedTransitionResult<OrderCtx> r2 = manager.proceed("exec-f");
+        assertThat(r2.getExecutionStatus()).isEqualTo(ExecutionStatus.RUNNING);
+
+        // Now WAITING → READY
+        assertThat(manager.eligibilityOf("exec-f")).isEqualTo(TriggerEligibility.READY);
+
+        // trigger() can now apply the next event
+        ManagedTransitionResult<OrderCtx> r3 = manager.trigger("exec-f", "GO");
+        assertThat(r3.getToState()).isEqualTo("DONE");
+        assertThat(r3.getExecutionStatus()).isEqualTo(ExecutionStatus.TERMINATED);
     }
 }

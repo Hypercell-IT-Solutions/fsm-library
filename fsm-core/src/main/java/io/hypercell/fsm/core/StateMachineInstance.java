@@ -20,7 +20,7 @@ import io.hypercell.fsm.resume.ExecutionSnapshot;
  * <p>
  * LIFECYCLE:
  * newInstance()  → status = RUNNING
- * trigger(event) → runs transition + sub-steps → may stay RUNNING or become FAILED/COMPLETED
+ * trigger(event) → runs transition + sub-steps → may stay RUNNING or become FAILED/TERMINATED
  * proceed()      → resumes from failure → may go back to RUNNING or fail again
  *
  * @param <C> the context type flowing through the machine
@@ -40,7 +40,7 @@ public interface StateMachineInstance<C> {
     StateDefinition<C> currentState();
 
     /**
-     * The current lifecycle status: {@code RUNNING}, {@code COMPLETED}, or {@code FAILED}.
+     * The current lifecycle status: {@code RUNNING}, {@code TERMINATED}, or {@code FAILED}.
      */
     ExecutionStatus status();
 
@@ -68,7 +68,7 @@ public interface StateMachineInstance<C> {
      * <p>
      * On success:
      * - Returns the new current state
-     * - Status is RUNNING (or COMPLETED if the new state is terminal)
+     * - Status is RUNNING (or TERMINATED if the new state is terminal)
      *
      * @throws InvalidEventException     if no valid transition exists for this event
      * @throws SubStepExecutionException if a sub-step fails
@@ -90,6 +90,21 @@ public interface StateMachineInstance<C> {
      * @throws SubStepExecutionException if the sub-step fails again
      */
     StateDefinition<C> proceed();
+
+    /**
+     * Resume an interrupted {@code RUNNING} execution by completing the remaining sub-steps
+     * of the current state, skipping those that have already been checkpointed.
+     * <p>
+     * Use this after {@link io.hypercell.fsm.core.StateMachineDefinition#resumeInterrupted}
+     * when the process previously crashed mid-transition. This method does <em>not</em>
+     * re-run the transition action or entry/exit hooks — those already executed before
+     * the crash. It simply completes the remaining sub-step work.
+     *
+     * @return the current state after all remaining sub-steps have been processed
+     * @throws InvalidEventException     if called when status is not {@code RUNNING}
+     * @throws SubStepExecutionException if a remaining sub-step fails
+     */
+    StateDefinition<C> resume();
 
     /**
      * Take a serializable snapshot of the current execution state.
@@ -122,9 +137,9 @@ public interface StateMachineInstance<C> {
     boolean isInTerminalState();
 
     /**
-     * {@code true} when status is {@code COMPLETED}.
+     * {@code true} when status is {@code TERMINATED}.
      */
-    boolean isCompleted();
+    boolean isTerminated();
 
     /**
      * {@code true} when status is {@code FAILED}.

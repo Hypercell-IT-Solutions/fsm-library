@@ -10,9 +10,22 @@ import java.util.Optional;
 /**
  * Orchestrates the full request lifecycle for HTTP-driven state machine workflows.
  * <p>
- * This is the component your HTTP endpoint talks to directly. Each call to trigger()
- * encapsulates the complete load → reconstruct → execute → save cycle, so the
- * endpoint never needs to know about snapshots, reconstitution, or machine instances.
+ * This is the component your HTTP endpoint talks to directly. Each call to
+ * {@link #trigger(String, String)} encapsulates the complete load → reconstruct → execute →
+ * save cycle, so the endpoint never needs to know about snapshots, reconstitution, or
+ * machine instances.
+ * <p>
+ * STRICT TRIGGER CONTRACT (1.0.0-RC2+):
+ * {@code trigger()} applies <em>exactly one</em> transition. It will only succeed when the
+ * execution is ready — snapshot absent (first event) or status {@code WAITING} (normal
+ * next-event path). For any other status it throws immediately:
+ * <ul>
+ *   <li>{@code FAILED} → call {@link #proceed(String)} first, then trigger.</li>
+ *   <li>{@code RUNNING} (interrupted crash) → call {@link #resume(String)} first, then trigger.</li>
+ *   <li>{@code RETRY_SCHEDULED} → wait for recovery, then trigger.</li>
+ *   <li>{@code TERMINATED} → throws {@link io.hypercell.fsm.exception.CompletedMachineException}.</li>
+ * </ul>
+ * Use {@link #eligibilityOf(String)} as an advisory pre-check before calling {@code trigger()}.
  * <p>
  * FULL LIFECYCLE PER REQUEST:
  * <p>
@@ -20,18 +33,27 @@ import java.util.Optional;
  * 2. Load snapshot from repository
  * 3. Resolve context (from contextLoader or caller-supplied override)
  * 4. Branch on snapshot status:
- * No snapshot  → newInstance(ctx, executionId) → trigger(event)
- * RUNNING      → reconstitute(ctx, snapshot)   → trigger(event)
- * FAILED       → resume(ctx, snapshot)         → proceed() → trigger(event)
- * COMPLETED    → throw CompletedMachineException
- * 5. Checkpoint is saved internally by trigger() / proceed()
+ *    No snapshot  → newInstance(ctx, executionId) → trigger(event)
+ *    WAITING      → reconstitute(ctx, snapshot)   → trigger(event)
+ *    FAILED       → throw {@link io.hypercell.fsm.exception.IllegalTriggerStateException}
+ *    RUNNING      → throw {@link io.hypercell.fsm.exception.IllegalTriggerStateException}
+ *    RETRY_SCHED  → throw {@link io.hypercell.fsm.exception.IllegalTriggerStateException}
+ *    TERMINATED   → throw {@link io.hypercell.fsm.exception.CompletedMachineException}
+ * 5. Checkpoint is saved internally by trigger()
  * 6. Release lock
  * 7. Return ManagedTransitionResult
  * <p>
- * FAILED + NEW EVENT (step 4 FAILED branch):
- * When the previous request failed mid-sub-step, the manager auto-retries the failed
- * sub-steps via proceed() before applying the new event. The sub-steps that already
- * completed in the previous run are skipped — they are NOT re-executed.
+ * EXPLICIT RECOVER-THEN-TRIGGER PATTERN:
+ * <pre>{@code
+ * TriggerEligibility eligibility = manager.eligibilityOf(orderId);
+ * if (eligibility == TriggerEligibility.NEEDS_PROCEED) {
+ *     manager.proceed(orderId);       // retry failed sub-steps
+ * } else if (eligibility == TriggerEligibility.NEEDS_RESUME) {
+ *     manager.resume(orderId);        // complete the interrupted transition
+ * }
+ * // Now READY — safe to trigger
+ * ManagedTransitionResult<OrderContext> result = manager.trigger(orderId, event);
+ * }</pre>
  * <p>
  * CONCURRENCY:
  * Per-executionId in-process locking prevents concurrent access within the same JVM.
@@ -57,19 +79,46 @@ import java.util.Optional;
 public interface StateMachineManager<C> {
 
     /**
-     * Process an event using the manager's configured contextLoader to supply ctx.
+     * Apply a single event to the execution.
+     * <p>
+     * The execution must be in a triggerable state:
+     * <ul>
+     *   <li><strong>No snapshot</strong> — first event ever; a new instance is created.</li>
+     *   <li><strong>WAITING</strong> — normal next-event path; the machine is reconstituted and
+     *       the event is applied.</li>
+     * </ul>
+     * Any other status causes an immediate throw:
+     * <ul>
+     *   <li>{@code FAILED} / {@code RETRY_SCHEDULED} →
+     *       {@link io.hypercell.fsm.exception.IllegalTriggerStateException} —
+     *       call {@link #proceed(String)} first.</li>
+     *   <li>{@code RUNNING} (interrupted) →
+     *       {@link io.hypercell.fsm.exception.IllegalTriggerStateException} —
+     *       call {@link #resume(String)} first.</li>
+     *   <li>{@code TERMINATED} →
+     *       {@link io.hypercell.fsm.exception.CompletedMachineException}.</li>
+     * </ul>
+     * Use {@link #eligibilityOf(String)} as an advisory pre-check.
      *
      * @param executionId your business entity ID (orderId, transactionId, etc.)
      * @param event       the event name from the incoming request
+     * @throws io.hypercell.fsm.exception.IllegalTriggerStateException if the execution is
+     *         FAILED, RUNNING, or RETRY_SCHEDULED
+     * @throws io.hypercell.fsm.exception.CompletedMachineException if the execution is TERMINATED
      */
     ManagedTransitionResult<C> trigger(String executionId, String event);
 
     /**
-     * Process an event with a caller-supplied context that overrides the contextLoader
+     * Apply a single event with a caller-supplied context that overrides the contextLoader
      * for this call only. Useful when the context is already available in the request
      * (e.g. the HTTP request body contains the order data).
+     * <p>
+     * Subject to the same eligibility constraints as {@link #trigger(String, String)}.
      *
      * @param contextOverride the ctx to use; null falls back to the contextLoader
+     * @throws io.hypercell.fsm.exception.IllegalTriggerStateException if the execution is
+     *         FAILED, RUNNING, or RETRY_SCHEDULED
+     * @throws io.hypercell.fsm.exception.CompletedMachineException if the execution is TERMINATED
      */
     ManagedTransitionResult<C> trigger(String executionId, String event, C contextOverride);
 
@@ -122,6 +171,47 @@ public interface StateMachineManager<C> {
     Optional<ExecutionSnapshot> snapshotOf(String executionId);
 
     /**
+     * Returns the current FSM state name for the given execution, or {@code empty} if the
+     * execution does not exist yet (no snapshot).
+     * <p>
+     * This is a read-only, lock-free call — it loads the snapshot directly from the repository
+     * and returns {@link io.hypercell.fsm.resume.ExecutionSnapshot#getCurrentStateName()}.
+     * <p>
+     * <strong>Advisory only.</strong> A concurrent {@code trigger()}, {@code proceed()}, or
+     * {@code resume()} call may advance the state between this call and any subsequent action.
+     *
+     * @param executionId the business entity ID
+     * @return the current state name, or {@code empty} if the execution has not started
+     */
+    Optional<String> currentState(String executionId);
+
+    /**
+     * Returns an advisory indication of whether {@link #trigger(String, String)} may be called
+     * on the given execution without throwing
+     * {@link io.hypercell.fsm.exception.IllegalTriggerStateException}.
+     * <p>
+     * Mapping:
+     * <ul>
+     *   <li>No snapshot → {@link TriggerEligibility#READY} (first event)</li>
+     *   <li>{@code WAITING} → {@link TriggerEligibility#READY}</li>
+     *   <li>{@code FAILED} → {@link TriggerEligibility#NEEDS_PROCEED}</li>
+     *   <li>{@code RETRY_SCHEDULED} → {@link TriggerEligibility#NEEDS_PROCEED}</li>
+     *   <li>{@code RUNNING} → {@link TriggerEligibility#NEEDS_RESUME}</li>
+     *   <li>{@code TERMINATED} → {@link TriggerEligibility#TERMINATED}</li>
+     * </ul>
+     * <p>
+     * This is a read-only, lock-free call. <strong>Advisory only</strong> — a concurrent
+     * operation may change the status between this call and the subsequent {@code trigger()}.
+     * {@code trigger()} always re-validates authoritatively under its per-execution lock and
+     * throws {@link io.hypercell.fsm.exception.IllegalTriggerStateException} if the execution
+     * is not eligible at that point.
+     *
+     * @param executionId the business entity ID
+     * @return the eligibility of the execution for a {@code trigger()} call
+     */
+    TriggerEligibility eligibilityOf(String executionId);
+
+    /**
      * Check if a state is the initial state of the machine definition.
      * Useful for validation and defensive programming.
      *
@@ -149,6 +239,61 @@ public interface StateMachineManager<C> {
      * decided not to auto-retry these, that decision should be respected.
      */
     void recoverPendingRetries();
+
+    /**
+     * Resume a specific interrupted execution by its ID.
+     * <p>
+     * An execution is <em>interrupted</em> when its snapshot has status {@code RUNNING} —
+     * the process crashed while sub-steps were executing. With the new status model,
+     * {@code RUNNING} means exclusively "actively processing sub-steps"; at-rest executions
+     * are now saved as {@code WAITING}.
+     * <p>
+     * Behaviour by snapshot status:
+     * <ul>
+     *   <li><strong>RUNNING</strong> — interrupted mid-transition; completes the remaining
+     *       sub-steps (skipping those already checkpointed) and returns the new state.</li>
+     *   <li><strong>WAITING</strong> — at-rest between transitions; no-op, returns the
+     *       current state without executing anything.</li>
+     *   <li><strong>FAILED</strong> — throws {@link IllegalStateException}; use
+     *       {@link #proceed(String)} instead.</li>
+     *   <li><strong>TERMINATED</strong> — throws {@link IllegalStateException}.</li>
+     * </ul>
+     *
+     * @param executionId the business entity ID whose snapshot is to be resumed
+     * @return the result after completing (or skipping) the interrupted transition
+     * @throws IllegalStateException    if the snapshot is FAILED or TERMINATED
+     * @throws IllegalArgumentException if no snapshot exists for the given ID
+     */
+    ManagedTransitionResult<C> resume(String executionId);
+
+    /**
+     * Resume all interrupted executions in parallel using the consumer-supplied executor.
+     * <p>
+     * With the new status model, {@code RUNNING} means exclusively "actively processing
+     * sub-steps" (a crash leaves the snapshot here). This method queries
+     * {@code listInterrupted(limit, afterId)} via keyset pagination, collects all
+     * interrupted execution IDs, submits a {@link #resume(String)} task for each to the
+     * configured recovery executor, and returns the submitted count immediately (async).
+     * <p>
+     * <strong>Requires a {@code recoveryExecutor} configured on the builder.</strong>
+     * If none is configured, throws {@link IllegalStateException} — use
+     * {@link #resume(String)} per execution instead, or configure one via
+     * {@link io.hypercell.fsm.builder.StateMachineBuilder#recoveryExecutor(java.util.concurrent.ExecutorService)}.
+     * <p>
+     * Recovery is best-effort: each execution is attempted independently; one failure does
+     * not stop others from running.
+     * <p>
+     * <strong>WARNING — Single-instance only.</strong> Do not call this in a multi-replica
+     * (clustered) deployment. A starting node could resume an execution being processed by a
+     * live peer. Multi-replica deployments should rely on lazy resume instead: every
+     * {@link #trigger(String, String)} and {@link #resume(String)} call automatically detects
+     * and completes interrupted executions.
+     *
+     * @return the number of resume tasks submitted to the executor (async — may still be
+     * in-flight when this method returns)
+     * @throws IllegalStateException if no {@code recoveryExecutor} is configured
+     */
+    int recoverInterruptedExecutions();
 
     /**
      * Create a new manager with a different context loader.

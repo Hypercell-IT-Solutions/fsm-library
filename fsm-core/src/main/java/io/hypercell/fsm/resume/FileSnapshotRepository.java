@@ -100,6 +100,20 @@ public class FileSnapshotRepository implements SnapshotRepository {
                 .toList();
     }
 
+    @Override
+    public List<ExecutionSnapshot> listInterrupted(int limit, String afterExecutionId) {
+        return listExecutionIds().stream()
+                .map(this::load)
+                .filter(Optional::isPresent)
+                .map(Optional::get)
+                .filter(ExecutionSnapshot::isRunning)
+                .sorted(java.util.Comparator.comparing(ExecutionSnapshot::getExecutionId))
+                .filter(s -> afterExecutionId == null
+                        || s.getExecutionId().compareTo(afterExecutionId) > 0)
+                .limit(limit)
+                .toList();
+    }
+
     /**
      * Serialize an ExecutionSnapshot to a flat Properties map.
      * <p>

@@ -6,8 +6,11 @@ import io.hypercell.fsm.core.ActionResult;
 import io.hypercell.fsm.core.ExecutionStatus;
 import io.hypercell.fsm.core.StateMachineDefinition;
 import io.hypercell.fsm.exception.CompletedMachineException;
+import io.hypercell.fsm.exception.IllegalTriggerStateException;
 import io.hypercell.fsm.exception.StateMachineException;
+import io.hypercell.fsm.resume.ExecutionSnapshot;
 import io.hypercell.fsm.resume.SnapshotRepository;
+import io.hypercell.fsm.resume.SnapshotStatus;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -99,12 +102,12 @@ class DefaultStateMachineManagerTest {
         ManagedTransitionResult<OrderContext> result = manager.trigger("order-3", "COMPLETE");
 
         assertThat(result.getToState()).isEqualTo("SHIPPED");
-        assertThat(result.getExecutionStatus()).isEqualTo(ExecutionStatus.COMPLETED);
-        assertThat(result.isCompleted()).isTrue();
+        assertThat(result.getExecutionStatus()).isEqualTo(ExecutionStatus.TERMINATED);
+        assertThat(result.isTerminated()).isTrue();
     }
 
     @Test
-    void trigger_onFailedSnapshot_autoProceedsThenTriggers() {
+    void trigger_onFailedSnapshot_throwsIllegalTriggerStateException() {
         AtomicBoolean fail = new AtomicBoolean(true);
         SnapshotRepository failRepo = StateMachine.inMemoryRepository();
         StateMachineDefinition<OrderContext> failDef = StateMachine.<OrderContext>define("order-fail")
@@ -128,13 +131,97 @@ class DefaultStateMachineManagerTest {
 
         ManagedTransitionResult<OrderContext> r1 = failManager.trigger("exec-1", "GO");
         assertThat(r1.getExecutionStatus()).isEqualTo(ExecutionStatus.FAILED);
-        assertThat(r1.getRootCause()).isNotNull()
-                .hasMessage("transient error");
+        assertThat(r1.getRootCause()).isNotNull().hasMessage("transient error");
 
-        ManagedTransitionResult<OrderContext> r2 = failManager.trigger("exec-1", "GO");
-        assertThat(r2.isProceededFromFailure()).isTrue();
-        assertThat(r2.getToState()).isEqualTo("DONE");
-        assertThat(r2.getExecutionStatus()).isEqualTo(ExecutionStatus.COMPLETED);
+        assertThatThrownBy(() -> failManager.trigger("exec-1", "GO"))
+                .isInstanceOf(IllegalTriggerStateException.class)
+                .hasMessageContaining("FAILED")
+                .hasMessageContaining("proceed()");
+
+        assertThat(failManager.eligibilityOf("exec-1")).isEqualTo(TriggerEligibility.NEEDS_PROCEED);
+
+        ManagedTransitionResult<OrderContext> r2 = failManager.proceed("exec-1");
+        assertThat(r2.getExecutionStatus()).isEqualTo(ExecutionStatus.RUNNING);
+
+        assertThat(failManager.eligibilityOf("exec-1")).isEqualTo(TriggerEligibility.READY);
+
+        ManagedTransitionResult<OrderContext> r3 = failManager.trigger("exec-1", "GO");
+        assertThat(r3.getToState()).isEqualTo("DONE");
+        assertThat(r3.getExecutionStatus()).isEqualTo(ExecutionStatus.TERMINATED);
+    }
+
+    @Test
+    void trigger_onRunningInterruptedSnapshot_throwsIllegalTriggerStateException() {
+        SnapshotRepository runningRepo = StateMachine.inMemoryRepository();
+        StateMachineDefinition<OrderContext> def = StateMachine.<OrderContext>define("order-running")
+                .initial("PENDING")
+                .snapshotRepository(runningRepo)
+                .contextLoader(id -> new OrderContext(id))
+                .state("PENDING")
+                .on("GO").to("WORKING").end()
+                .and()
+                .state("WORKING")
+                .subStep("doWork", ctx -> ActionResult.success())
+                .on("DONE").to("FINISHED").end()
+                .and()
+                .state("FINISHED").terminal().and()
+                .build();
+
+        StateMachineManager<OrderContext> m = StateMachine.manager(def, runningRepo);
+
+        ExecutionSnapshot interrupted = new ExecutionSnapshot.Builder()
+                .executionId("exec-run")
+                .machineDefinitionId("order-running")
+                .currentStateName("WORKING")
+                .lastTriggerEvent("GO")
+                .completedSubStepResults(java.util.Map.of())
+                .status(SnapshotStatus.RUNNING)
+                .capturedAt(java.time.Instant.now())
+                .build();
+        runningRepo.save("exec-run", interrupted);
+
+        assertThatThrownBy(() -> m.trigger("exec-run", "DONE"))
+                .isInstanceOf(IllegalTriggerStateException.class)
+                .hasMessageContaining("RUNNING")
+                .hasMessageContaining("resume()");
+
+        assertThat(m.eligibilityOf("exec-run")).isEqualTo(TriggerEligibility.NEEDS_RESUME);
+
+        ManagedTransitionResult<OrderContext> resumeResult = m.resume("exec-run");
+        assertThat(resumeResult.getExecutionStatus()).isEqualTo(ExecutionStatus.RUNNING);
+        assertThat(resumeResult.getToState()).isEqualTo("WORKING");
+
+        assertThat(m.eligibilityOf("exec-run")).isEqualTo(TriggerEligibility.READY);
+
+        ManagedTransitionResult<OrderContext> r = m.trigger("exec-run", "DONE");
+        assertThat(r.getToState()).isEqualTo("FINISHED");
+        assertThat(r.getExecutionStatus()).isEqualTo(ExecutionStatus.TERMINATED);
+    }
+
+    @Test
+    void eligibilityOf_returnsReadyForAbsentAndWaiting() {
+        assertThat(manager.eligibilityOf("never-seen")).isEqualTo(TriggerEligibility.READY);
+
+        manager.trigger("order-elig", "APPROVE");
+        assertThat(manager.eligibilityOf("order-elig")).isEqualTo(TriggerEligibility.READY);
+    }
+
+    @Test
+    void eligibilityOf_returnsTerminatedAfterCompletion() {
+        manager.trigger("order-term", "APPROVE");
+        manager.trigger("order-term", "COMPLETE");
+        assertThat(manager.eligibilityOf("order-term")).isEqualTo(TriggerEligibility.TERMINATED);
+    }
+
+    @Test
+    void currentState_returnsStateName_andEmptyForAbsent() {
+        assertThat(manager.currentState("never-seen")).isEmpty();
+
+        manager.trigger("order-cs", "APPROVE");
+        assertThat(manager.currentState("order-cs")).hasValue("PROCESSING");
+
+        manager.trigger("order-cs", "COMPLETE");
+        assertThat(manager.currentState("order-cs")).hasValue("SHIPPED");
     }
 
     @Test

@@ -29,9 +29,9 @@ import java.util.stream.Collectors;
  * All fields are either primitives, Strings, Instants, or Maps of those types.
  * The SnapshotRepository implementation handles the actual serialization.
  * <p>
- * The composite key format for completedSubStepResults is just the sub-step name
- * (e.g., "validateOrder", "processPayment"), since each snapshot contains only
- * one state's completed steps.
+ * The composite key format for completedSubStepResults is {@code "stateName::subStepName"}
+ * (e.g., {@code "PROCESSING::validateOrder"}, {@code "PROCESSING::processPayment"}).
+ * Using a composite key prevents collisions when steps from multiple states are recorded.
  */
 public class ExecutionSnapshot {
 
@@ -117,12 +117,16 @@ public class ExecutionSnapshot {
                 .build();
     }
 
-    /** Return a copy of this snapshot with the attempt number incremented to {@code newAttempt}. */
+    /**
+     * Return a copy of this snapshot with the attempt number incremented to {@code newAttempt}.
+     */
     public ExecutionSnapshot withAttemptNumber(int newAttempt) {
         return new Builder(this).attemptNumber(newAttempt).build();
     }
 
-    /** Return a copy of this snapshot with a different {@link SnapshotStatus}. */
+    /**
+     * Return a copy of this snapshot with a different {@link SnapshotStatus}.
+     */
     public ExecutionSnapshot withStatus(SnapshotStatus newStatus) {
         return new Builder(this).status(newStatus).build();
     }
@@ -136,52 +140,81 @@ public class ExecutionSnapshot {
                 .status(SnapshotStatus.RETRY_SCHEDULED).build();
     }
 
-    /** Return a copy of this snapshot with a different machine definition ID. */
+    /**
+     * Return a copy of this snapshot with a different machine definition ID.
+     */
     public ExecutionSnapshot withMachineDefinitionId(String id) {
         return new Builder(this).machineDefinitionId(id).build();
     }
 
-    /** {@code true} when status is {@code RUNNING} (a retry is currently executing). */
+    /**
+     * {@code true} when status is {@code RUNNING} (execution is actively processing sub-steps).
+     */
     public boolean isRunning() {
         return status == SnapshotStatus.RUNNING;
     }
 
-    /** {@code true} when status is {@code FAILED} (waiting for manual or scheduled retry). */
+    /**
+     * {@code true} when status is {@code FAILED} (waiting for manual or scheduled retry).
+     */
     public boolean isFailed() {
         return status == SnapshotStatus.FAILED;
     }
 
-    /** {@code true} when status is {@code COMPLETED} (snapshot should have been deleted). */
-    public boolean isCompleted() {
-        return status == SnapshotStatus.COMPLETED;
+    /**
+     * {@code true} when status is {@code WAITING} — sub-steps completed; machine is parked
+     * at a non-terminal state awaiting the next event.
+     */
+    public boolean isWaiting() {
+        return status == SnapshotStatus.WAITING;
     }
 
-    /** The business entity ID; used as the repository storage key. */
+    /**
+     * {@code true} when status is {@code TERMINATED} — a terminal state was reached
+     * successfully (snapshot retained to guard against re-triggering).
+     */
+    public boolean isTerminated() {
+        return status == SnapshotStatus.TERMINATED;
+    }
+
+    /**
+     * The business entity ID; used as the repository storage key.
+     */
     public String getExecutionId() {
         return executionId;
     }
 
-    /** The {@link io.hypercell.fsm.core.StateMachineDefinition#id()} this snapshot belongs to. */
+    /**
+     * The {@link io.hypercell.fsm.core.StateMachineDefinition#id()} this snapshot belongs to.
+     */
     public String getMachineDefinitionId() {
         return machineDefinitionId;
     }
 
-    /** The state the machine is positioned in (where resumption should start). */
+    /**
+     * The state the machine is positioned in (where resumption should start).
+     */
     public String getCurrentStateName() {
         return currentStateName;
     }
 
-    /** The state containing the failed sub-step; {@code null} for {@code RUNNING} checkpoints. */
+    /**
+     * The state containing the failed sub-step; {@code null} for {@code RUNNING} checkpoints.
+     */
     public String getFailedStateName() {
         return failedStateName;
     }
 
-    /** The sub-step that failed; {@code null} for {@code RUNNING} checkpoints. */
+    /**
+     * The sub-step that failed; {@code null} for {@code RUNNING} checkpoints.
+     */
     public String getFailedSubStepName() {
         return failedSubStepName;
     }
 
-    /** The event that was being processed when this snapshot was taken; may be {@code null}. */
+    /**
+     * The event that was being processed when this snapshot was taken; may be {@code null}.
+     */
     public String getLastTriggerEvent() {
         return lastTriggerEvent;
     }
@@ -202,7 +235,9 @@ public class ExecutionSnapshot {
         return attemptNumber;
     }
 
-    /** When the most recent failure occurred; may be {@code null} for {@code RUNNING} checkpoints. */
+    /**
+     * When the most recent failure occurred; may be {@code null} for {@code RUNNING} checkpoints.
+     */
     public Instant getLastFailedAt() {
         return lastFailedAt;
     }
@@ -216,17 +251,23 @@ public class ExecutionSnapshot {
         return scheduledRetryAt;
     }
 
-    /** The error message from the most recent failure; {@code null} for {@code RUNNING} checkpoints. */
+    /**
+     * The error message from the most recent failure; {@code null} for {@code RUNNING} checkpoints.
+     */
     public String getLastErrorMessage() {
         return lastErrorMessage;
     }
 
-    /** The current persistence status of this snapshot. */
+    /**
+     * The current persistence status of this snapshot.
+     */
     public SnapshotStatus getStatus() {
         return status;
     }
 
-    /** When this snapshot object was created (wall-clock time). */
+    /**
+     * When this snapshot object was created (wall-clock time).
+     */
     public Instant getCapturedAt() {
         return capturedAt;
     }
@@ -245,10 +286,10 @@ public class ExecutionSnapshot {
 
     /**
      * Check whether a specific sub-step was completed and recorded in this snapshot.
-     * Key format: just the sub-step name (e.g., "validateOrder").
+     * Key format: {@code "stateName::subStepName"} (e.g., {@code "PROCESSING::validateOrder"}).
      */
-    public boolean isSubStepCompleted(String subStepName) {
-        return completedSubStepResults.containsKey(subStepName);
+    public boolean isSubStepCompleted(String compositeKey) {
+        return completedSubStepResults.containsKey(compositeKey);
     }
 
     /**

@@ -13,6 +13,7 @@ import io.hypercell.fsm.retry.RetryCoordinator;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
 
 /**
  * The validated, immutable state machine blueprint.
@@ -34,6 +35,13 @@ public class DefaultStateMachineDefinition<C> implements StateMachineDefinition<
     private final RetryCoordinator<C> retryCoordinator;
     private final EventBus<C> eventBus;
     private final ContextLoader<C> contextLoader;
+    private final ExecutorService recoveryExecutor;
+    private final int recoveryPageSize;
+
+    /**
+     * Default recovery page size when none is configured on the builder.
+     */
+    public static final int DEFAULT_RECOVERY_PAGE_SIZE = 100;
 
     public DefaultStateMachineDefinition(String id,
                                          StateDefinition<C> initialState,
@@ -44,6 +52,35 @@ public class DefaultStateMachineDefinition<C> implements StateMachineDefinition<
                                          RetryCoordinator<C> retryCoordinator,
                                          EventBus<C> eventBus,
                                          ContextLoader<C> contextLoader) {
+        this(id, initialState, states, transitions, resumePolicy, snapshotRepository,
+                retryCoordinator, eventBus, contextLoader, null, DEFAULT_RECOVERY_PAGE_SIZE);
+    }
+
+    public DefaultStateMachineDefinition(String id,
+                                         StateDefinition<C> initialState,
+                                         Map<String, StateDefinition<C>> states,
+                                         Map<String, List<TransitionDefinition<C>>> transitions,
+                                         ResumePolicy<C> resumePolicy,
+                                         SnapshotRepository snapshotRepository,
+                                         RetryCoordinator<C> retryCoordinator,
+                                         EventBus<C> eventBus,
+                                         ContextLoader<C> contextLoader,
+                                         ExecutorService recoveryExecutor) {
+        this(id, initialState, states, transitions, resumePolicy, snapshotRepository,
+                retryCoordinator, eventBus, contextLoader, recoveryExecutor, DEFAULT_RECOVERY_PAGE_SIZE);
+    }
+
+    public DefaultStateMachineDefinition(String id,
+                                         StateDefinition<C> initialState,
+                                         Map<String, StateDefinition<C>> states,
+                                         Map<String, List<TransitionDefinition<C>>> transitions,
+                                         ResumePolicy<C> resumePolicy,
+                                         SnapshotRepository snapshotRepository,
+                                         RetryCoordinator<C> retryCoordinator,
+                                         EventBus<C> eventBus,
+                                         ContextLoader<C> contextLoader,
+                                         ExecutorService recoveryExecutor,
+                                         int recoveryPageSize) {
         this.id = id;
         this.initialState = initialState;
         this.states = Collections.unmodifiableMap(states);
@@ -53,6 +90,8 @@ public class DefaultStateMachineDefinition<C> implements StateMachineDefinition<
         this.retryCoordinator = retryCoordinator;
         this.eventBus = eventBus != null ? eventBus : EventBus.empty();
         this.contextLoader = contextLoader;
+        this.recoveryExecutor = recoveryExecutor;
+        this.recoveryPageSize = recoveryPageSize > 0 ? recoveryPageSize : DEFAULT_RECOVERY_PAGE_SIZE;
     }
 
     @Override
@@ -83,6 +122,16 @@ public class DefaultStateMachineDefinition<C> implements StateMachineDefinition<
     @Override
     public ContextLoader<C> contextLoader() {
         return contextLoader;
+    }
+
+    @Override
+    public ExecutorService recoveryExecutor() {
+        return recoveryExecutor;
+    }
+
+    @Override
+    public int recoveryPageSize() {
+        return recoveryPageSize;
     }
 
     @Override
@@ -146,10 +195,6 @@ public class DefaultStateMachineDefinition<C> implements StateMachineDefinition<
             executionRecord.setLastTriggerEvent(snapshot.getLastTriggerEvent());
         }
 
-        if (repository != null) {
-            repository.save(snapshot.getExecutionId(), snapshot.withStatus(SnapshotStatus.RUNNING));
-        }
-
         return new DefaultStateMachineInstance<>(this, currentState, ctx, snapshot.getAttemptNumber(),
                 executionRecord, ExecutionStatus.RUNNING, repository, retryCoordinator, eventBus);
     }
@@ -173,6 +218,39 @@ public class DefaultStateMachineDefinition<C> implements StateMachineDefinition<
                 this, failedState, ctx, snapshot.getAttemptNumber(), hydratedRecord,
                 ExecutionStatus.FAILED, repository != null ? repository : snapshotRepository, retryCoordinator,
                 eventBus);
+    }
+
+    @Override
+    public DefaultStateMachineInstance<C> resumeInterrupted(C ctx, ExecutionSnapshot snapshot,
+                                                            SnapshotRepository repository) {
+        StateDefinition<C> currentState = stateByName(snapshot.getCurrentStateName());
+        ExecutionRecord executionRecord = new ExecutionRecord(
+                snapshot.getExecutionId(), snapshot.getCurrentStateName());
+
+        String stateName = snapshot.getCurrentStateName();
+        for (Map.Entry<String, ActionResult> entry
+                : snapshot.getCompletedSubStepResults().entrySet()) {
+            String key = entry.getKey();
+            if (key.contains("::")) {
+                String[] parts = key.split("::", 2);
+                executionRecord.recordStep(parts[0], parts[1], entry.getValue());
+            } else {
+                executionRecord.recordStep(stateName, key, entry.getValue());
+            }
+        }
+
+        if (snapshot.getLastTriggerEvent() != null) {
+            executionRecord.setLastTriggerEvent(snapshot.getLastTriggerEvent());
+        }
+
+        SnapshotRepository effectiveRepo = repository != null ? repository : snapshotRepository;
+        if (effectiveRepo != null) {
+            effectiveRepo.save(snapshot.getExecutionId(), snapshot.withStatus(SnapshotStatus.RUNNING));
+        }
+
+        return new DefaultStateMachineInstance<>(
+                this, currentState, ctx, snapshot.getAttemptNumber(), executionRecord,
+                ExecutionStatus.RUNNING, effectiveRepo, retryCoordinator, eventBus);
     }
 
     private ExecutionRecord hydrateRecord(ExecutionSnapshot snapshot) {

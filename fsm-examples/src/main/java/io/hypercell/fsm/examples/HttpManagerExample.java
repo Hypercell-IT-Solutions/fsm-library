@@ -102,9 +102,8 @@ public class HttpManagerExample {
     }
 
     static void logResult(ManagedTransitionResult<OrderContext> r) {
-        System.out.printf("  %s → %s  [%s]%s%n",
-                r.getFromState(), r.getToState(), r.getExecutionStatus(),
-                r.isProceededFromFailure() ? "  (auto-proceeded from prior failure)" : "");
+        System.out.printf("  %s → %s  [%s]%n",
+                r.getFromState(), r.getToState(), r.getExecutionStatus());
     }
 
     // -------------------------------------------------------------------------

@@ -81,8 +81,8 @@ class DefaultStateMachineInstanceTest {
         StateMachineInstance<OrderContext> instance = definition.newInstance(new OrderContext("o1"), "o1");
         instance.trigger("APPROVE");
         instance.trigger("COMPLETE");
-        assertThat(instance.status()).isEqualTo(ExecutionStatus.COMPLETED);
-        assertThat(instance.isCompleted()).isTrue();
+        assertThat(instance.status()).isEqualTo(ExecutionStatus.TERMINATED);
+        assertThat(instance.isTerminated()).isTrue();
         assertThat(instance.isInTerminalState()).isTrue();
     }
 
@@ -168,7 +168,7 @@ class DefaultStateMachineInstanceTest {
         assertThat(repo.load("o1-chk")).isPresent()
                 .hasValueSatisfying(s -> {
                     assertThat(s.getCurrentStateName()).isEqualTo("PROCESSING");
-                    assertThat(s.getStatus()).isEqualTo(SnapshotStatus.RUNNING);
+                    assertThat(s.getStatus()).isEqualTo(SnapshotStatus.WAITING);
                 });
     }
 

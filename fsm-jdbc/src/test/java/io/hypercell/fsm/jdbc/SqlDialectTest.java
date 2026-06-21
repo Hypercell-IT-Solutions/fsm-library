@@ -51,6 +51,19 @@ class SqlDialectTest {
     }
 
     @Test
+    void limitClause_isDialectSpecific_oracleUsesFetchFirst() {
+        // Oracle does not support LIMIT — it must use FETCH FIRST n ROWS ONLY.
+        assertThat(new OracleDialect().limitClause(100)).isEqualTo("FETCH FIRST 100 ROWS ONLY");
+        // The others use the standard LIMIT n form.
+        for (SqlDialect dialect : List.of(
+                new H2Dialect(), new PostgreSqlDialect(), new MySqlDialect(), new SqliteDialect())) {
+            assertThat(dialect.limitClause(100))
+                    .as("Dialect %s", dialect.getClass().getSimpleName())
+                    .isEqualTo("LIMIT 100");
+        }
+    }
+
+    @Test
     void upsertSql_uses13PositionalParameters() {
         for (SqlDialect dialect : List.of(
                 new H2Dialect(), new PostgreSqlDialect(), new MySqlDialect(),
