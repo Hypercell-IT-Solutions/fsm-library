@@ -63,4 +63,12 @@ public class OracleDialect implements SqlDialect {
                 )
                 """, tableName);
     }
+
+    /**
+     * Oracle does not support {@code LIMIT}; use {@code FETCH FIRST n ROWS ONLY} (Oracle 12c+).
+     */
+    @Override
+    public String limitClause(int limit) {
+        return "FETCH FIRST " + limit + " ROWS ONLY";
+    }
 }

@@ -1,5 +1,6 @@
 package io.hypercell.fsm.resume;
 
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -43,12 +44,27 @@ public class InMemorySnapshotRepository implements SnapshotRepository {
                 .toList();
     }
 
-    /** Returns the number of snapshots currently held in memory. Useful in tests. */
+    @Override
+    public List<ExecutionSnapshot> listInterrupted(int limit, String afterExecutionId) {
+        return store.values().stream()
+                .filter(ExecutionSnapshot::isRunning)
+                .sorted(Comparator.comparing(ExecutionSnapshot::getExecutionId))
+                .filter(s -> afterExecutionId == null
+                        || s.getExecutionId().compareTo(afterExecutionId) > 0)
+                .limit(limit)
+                .toList();
+    }
+
+    /**
+     * Returns the number of snapshots currently held in memory. Useful in tests.
+     */
     public int size() {
         return store.size();
     }
 
-    /** Factory method; equivalent to {@code new InMemorySnapshotRepository()}. */
+    /**
+     * Factory method; equivalent to {@code new InMemorySnapshotRepository()}.
+     */
     public static InMemorySnapshotRepository create() {
         return new InMemorySnapshotRepository();
     }

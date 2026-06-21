@@ -82,6 +82,17 @@ public class OrderController {
             @PathVariable String orderId,
             @RequestBody EventRequest event) {
         try {
+            // 1.0.0-RC2+: trigger() is strict — requires WAITING (or no snapshot).
+            // Use eligibilityOf() to recover before triggering.
+            TriggerEligibility eligibility = orderManager.eligibilityOf(orderId);
+            if (eligibility == TriggerEligibility.NEEDS_PROCEED) {
+                orderManager.proceed(orderId);
+            } else if (eligibility == TriggerEligibility.NEEDS_RESUME) {
+                orderManager.resume(orderId);
+            } else if (eligibility == TriggerEligibility.TERMINATED) {
+                return ResponseEntity.status(409).body("Workflow already completed");
+            }
+
             ManagedTransitionResult<OrderContext> result = 
                 orderManager.trigger(orderId, event.name());
             
@@ -93,6 +104,8 @@ public class OrderController {
             return ResponseEntity.status(409).body("Another request is processing this order");
         } catch (CompletedMachineException e) {
             return ResponseEntity.status(409).body("Workflow already completed");
+        } catch (IllegalTriggerStateException e) {
+            return ResponseEntity.status(409).body("Execution not ready: " + e.getMessage());
         }
     }
 }
@@ -234,6 +247,18 @@ public class OrderController {
     @PostMapping("/trigger/{event}")
     public ResponseEntity<?> trigger(@PathVariable String orderId, @PathVariable String event) {
         try {
+            // 1.0.0-RC2+: trigger() requires the execution to be WAITING (or new).
+            // Use eligibilityOf() to recover before triggering.
+            TriggerEligibility eligibility = manager.eligibilityOf(orderId);
+            switch (eligibility) {
+                case NEEDS_PROCEED -> manager.proceed(orderId);   // retry failed sub-steps first
+                case NEEDS_RESUME  -> manager.resume(orderId);    // complete interrupted transition first
+                case TERMINATED -> {
+                    return ResponseEntity.status(409).body("Order already completed");
+                }
+                case READY -> {} // fall through — safe to trigger
+            }
+
             ManagedTransitionResult<OrderContext> result = manager.trigger(orderId, event);
             return ResponseEntity.ok(Map.of(
                 "status", result.getExecutionStatus(),
@@ -243,6 +268,9 @@ public class OrderController {
             return ResponseEntity.status(409).body("Another request is processing this order");
         } catch (CompletedMachineException e) {
             return ResponseEntity.status(409).body("Order already completed");
+        } catch (IllegalTriggerStateException e) {
+            // Concurrent modification between eligibilityOf() and trigger()
+            return ResponseEntity.status(409).body("Execution not ready: " + e.getMessage());
         }
     }
 
@@ -280,7 +308,8 @@ server.port=8080
 On application startup, the FSM library:
 
 1. **Runs the schema migration runner** — bootstraps the two tracking tables (`fsm_schema_history`, `fsm_schema_lock`), acquires a distributed DB lock, applies any not-yet-applied versioned migrations in order (currently V1: creates the `fsm_snapshots` table and its status index), verifies checksums of previously-applied migrations, and releases the lock. The migration is safe under concurrent multi-replica startup. See [Schema migrations](#schema-migrations) below for configuration options.
-2. **Calls `recoverPendingRetries()`** to resume any failed executions that are scheduled for retry
+2. **Calls `recoverPendingRetries()`** to resume any failed executions that are scheduled for retry.
+3. *(Optional, single-instance only)* **Calls `recoverInterruptedExecutions()`** to complete executions whose process crashed mid-transition.
 
 Add this to your configuration:
 
@@ -293,11 +322,61 @@ public class OrderWorkflowStartupListener implements ApplicationListener<Context
 
     @Override
     public void onApplicationEvent(ContextRefreshedEvent event) {
-        // Resume any failed executions with scheduled retries
+        // Reschedule FAILED/RETRY_SCHEDULED retries
         manager.recoverPendingRetries();
+
+        // Resume executions interrupted by a crash mid-sub-step.
+        // WARNING: call only in single-instance deployments (see below).
+        // Requires recoveryExecutor configured on the definition.
+        int submitted = manager.recoverInterruptedExecutions();  // async — returns submitted count
+        if (submitted > 0) {
+            log.info("Submitted {} interrupted executions for recovery", submitted);
+        }
     }
 }
 ```
+
+### Snapshot status model
+
+The persisted `SnapshotStatus` encodes precisely where an execution is at rest:
+
+| Status | Meaning |
+|---|---|
+| `RUNNING` | Execution is **actively processing sub-steps**. A crash leaves the snapshot here. `listInterrupted()` returns only these rows (cheap indexed query). |
+| `WAITING` | Sub-steps completed; machine is **parked at a non-terminal state** awaiting the next event. Normal at-rest status. **Not** returned by `listInterrupted()`. |
+| `TERMINATED` | A terminal state was reached successfully. Retained so re-triggering throws `CompletedMachineException`. |
+| `FAILED` | A sub-step failed; awaiting manual or scheduled retry. |
+| `RETRY_SCHEDULED` | An automatic retry has been scheduled. |
+
+### Interrupted executions: lazy vs. startup sweep
+
+The library persists a **`RUNNING` checkpoint** after each successfully executed sub-step (1.0.0-RC2+). When all sub-steps complete and the machine parks at a non-terminal state, it saves a **`WAITING` checkpoint**. If the process crashes mid-sub-step, the snapshot stays `RUNNING`. Two strategies detect and resume interrupted executions:
+
+| Strategy | Safety | When to use |
+|---|---|---|
+| **Lazy** (built-in to `trigger()` and `resume()`) | Safe in all deployments, including distributed | All deployments — the client re-driving a specific execution is inherently safe |
+| **Startup sweep** (`recoverInterruptedExecutions()`) | **Single-instance only** | Single-JVM deployments where you want to eagerly recover on startup |
+
+> **Distributed deployments must not call `recoverInterruptedExecutions()` on startup.** A starting node could resume an execution that is actively being processed by a live peer, causing duplicate sub-step execution. In a multi-replica environment, rely on lazy resume: the next `trigger()` or `resume()` call for a specific execution will automatically detect and complete any in-flight transition, which is safe because the client owns that execution.
+
+**`recoverInterruptedExecutions()` requires a `recoveryExecutor`** configured on the definition builder. Without one, it throws `IllegalStateException`. The method is **async** — it collects all interrupted IDs via keyset-paginated `listInterrupted()` calls, submits each to the executor, and returns the **count submitted** immediately (executions may still be in-flight on return).
+
+```java
+// Configure recovery executor on the definition bean
+@Bean
+public StateMachineDefinition<OrderContext> orderWorkflow(
+        JdbcSnapshotRepository snapshotRepository,
+        OrderRepository orderRepository) {
+    return StateMachine.<OrderContext>define("order-workflow")
+        // ... states, transitions
+        .snapshotRepository(snapshotRepository)
+        .contextLoader(orderId -> orderRepository.findById(orderId))
+        .recoveryExecutor(Executors.newFixedThreadPool(4))  // consumer owns lifecycle
+        .build();
+}
+```
+
+`listInterrupted()` in `JdbcSnapshotRepository` executes `SELECT … WHERE status = 'RUNNING' AND execution_id > ? ORDER BY execution_id LIMIT ?` — a keyset-paginated, indexed scan that returns only genuinely interrupted rows. No additional column or index is needed beyond the existing `status` index created by V1.
 
 ---
 
@@ -340,7 +419,7 @@ You can apply these files directly with your database CLI, or feed them into an 
 
 ## State validation and error handling
 
-Use the new state validation methods to safely guard against configuration changes:
+Use `eligibilityOf()` and `currentState()` for advisory pre-checks, and handle the new `IllegalTriggerStateException` for FAILED/RUNNING/RETRY_SCHEDULED executions:
 
 ```java
 @PostMapping("/trigger/{event}")
@@ -352,6 +431,14 @@ public ResponseEntity<?> trigger(@PathVariable String orderId, @PathVariable Str
     }
 
     try {
+        // 1.0.0-RC2+: trigger() is strict — recover before triggering.
+        TriggerEligibility eligibility = manager.eligibilityOf(orderId);
+        if (eligibility == TriggerEligibility.NEEDS_PROCEED) {
+            manager.proceed(orderId);
+        } else if (eligibility == TriggerEligibility.NEEDS_RESUME) {
+            manager.resume(orderId);
+        }
+
         ManagedTransitionResult<OrderContext> result = manager.trigger(orderId, event);
         
         // Inspect root cause of failure if needed
@@ -367,6 +454,9 @@ public ResponseEntity<?> trigger(@PathVariable String orderId, @PathVariable Str
         return ResponseEntity.ok(result);
     } catch (ConcurrentExecutionException e) {
         return ResponseEntity.status(409).body("Concurrent request");
+    } catch (IllegalTriggerStateException e) {
+        // Execution is FAILED/RUNNING/RETRY_SCHEDULED — guide caller to recover first
+        return ResponseEntity.status(409).body(e.getMessage());
     }
 }
 ```

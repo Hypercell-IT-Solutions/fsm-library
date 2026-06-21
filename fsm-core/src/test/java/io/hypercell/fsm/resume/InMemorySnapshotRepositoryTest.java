@@ -54,14 +54,14 @@ class InMemorySnapshotRepositoryTest {
     }
 
     @Test
-    void listPendingRetries_returnsFailedAndRetryScheduled_notRunningOrCompleted() {
+    void listPendingRetries_returnsFailedAndRetryScheduled_notRunningOrTerminated() {
         repo.save("failed-1", failedSnapshot("failed-1"));
         repo.save("scheduled-1", failedSnapshot("scheduled-1")
                 .withScheduledRetryAt(Instant.now().plusSeconds(10)));
         repo.save("running-1", new ExecutionSnapshot.Builder()
                 .executionId("running-1").status(SnapshotStatus.RUNNING).capturedAt(Instant.now()).build());
-        repo.save("completed-1", new ExecutionSnapshot.Builder()
-                .executionId("completed-1").status(SnapshotStatus.COMPLETED).capturedAt(Instant.now()).build());
+        repo.save("terminated-1", new ExecutionSnapshot.Builder()
+                .executionId("terminated-1").status(SnapshotStatus.TERMINATED).capturedAt(Instant.now()).build());
 
         List<ExecutionSnapshot> pending = repo.listPendingRetries();
 

@@ -6,6 +6,7 @@ import io.hypercell.fsm.core.StateMachineDefinition;
 import io.hypercell.fsm.core.StateMachineInstance;
 import io.hypercell.fsm.exception.CompletedMachineException;
 import io.hypercell.fsm.exception.ConcurrentExecutionException;
+import io.hypercell.fsm.exception.IllegalTriggerStateException;
 import io.hypercell.fsm.exception.StateMachineException;
 import io.hypercell.fsm.exception.SubStepExecutionException;
 import io.hypercell.fsm.resume.ExecutionSnapshot;
@@ -25,23 +26,24 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
 
 /**
- * Default implementation of StateMachineManager.
+ * Default implementation of {@link StateMachineManager}.
  * <p>
  * CONCURRENCY MODEL:
  * A {@code ConcurrentHashMap<executionId, ReentrantLock>} provides per-execution in-process
  * locking. {@code ReentrantLock.tryLock()} returns immediately (non-blocking): if the lock
- * is held by another thread, {@code ConcurrentExecutionException} is thrown rather than
- * blocking the caller. This maps naturally to HTTP: return 409 Conflict immediately
- * rather than making the client wait.
+ * is held by another thread, {@link io.hypercell.fsm.exception.ConcurrentExecutionException}
+ * is thrown rather than blocking the caller. This maps naturally to HTTP: return 409 Conflict
+ * immediately rather than making the client wait.
  * <p>
- * Lock entries are cleaned up after each call to avoid unbounded map growth. Entries
- * are only removed when no thread is waiting — checked via {@code ReentrantLock.hasQueuedThreads()}.
+ * Lock entries are cleaned up after each call to avoid unbounded map growth. Entries are only
+ * removed when no thread is waiting — checked via {@code ReentrantLock.hasQueuedThreads()}.
  * <p>
- * AUTO-PROCEED BEHAVIOR:
- * When a FAILED snapshot is found and a new event arrives, the manager calls proceed()
- * first (which retries failed sub-steps, skipping the ones that already succeeded),
- * then calls trigger(event) to apply the new transition. This matches the requirement:
- * "auto-proceed, but completed sub-steps should not be evaluated twice."
+ * STRICT TRIGGER CONTRACT:
+ * {@link #trigger(String, String)} applies exactly one transition. Executions that require
+ * prior recovery (FAILED → {@link #proceed(String)}, RUNNING → {@link #resume(String)}) or
+ * are not yet retryable (RETRY_SCHEDULED) cause
+ * {@link io.hypercell.fsm.exception.IllegalTriggerStateException} to be thrown immediately.
+ * The caller is responsible for explicit recovery before re-triggering.
  *
  * @param <C> the context type flowing through the machine
  */
@@ -118,6 +120,27 @@ public class DefaultStateMachineManager<C> implements StateMachineManager<C> {
     }
 
     @Override
+    public Optional<String> currentState(String executionId) {
+        return repository.load(executionId)
+                .map(ExecutionSnapshot::getCurrentStateName);
+    }
+
+    @Override
+    public TriggerEligibility eligibilityOf(String executionId) {
+        Optional<ExecutionSnapshot> snapshotOpt = repository.load(executionId);
+        if (snapshotOpt.isEmpty()) {
+            return TriggerEligibility.READY;
+        }
+        ExecutionSnapshot snapshot = snapshotOpt.get();
+        return switch (snapshot.getStatus()) {
+            case WAITING -> TriggerEligibility.READY;
+            case FAILED, RETRY_SCHEDULED -> TriggerEligibility.NEEDS_PROCEED;
+            case RUNNING -> TriggerEligibility.NEEDS_RESUME;
+            case TERMINATED -> TriggerEligibility.TERMINATED;
+        };
+    }
+
+    @Override
     public StateMachineManager<C> withContextLoader(ContextLoader<C> contextLoader) {
         return new DefaultStateMachineManager<>(definition, repository, contextLoader);
     }
@@ -130,6 +153,131 @@ public class DefaultStateMachineManager<C> implements StateMachineManager<C> {
     @Override
     public boolean isTerminal(String stateName) {
         return definition.isTerminal(stateName);
+    }
+
+    @Override
+    public ManagedTransitionResult<C> resume(String executionId) {
+        ReentrantLock lock = acquireLock(executionId);
+        try {
+            ExecutionSnapshot snapshot = repository.load(executionId)
+                    .orElseThrow(() -> new IllegalArgumentException(
+                            "No snapshot found for executionId: " + executionId));
+
+            if (snapshot.isTerminated()) {
+                throw new IllegalStateException(
+                        "Cannot resume a TERMINATED execution '" + executionId
+                                + "'. The workflow has already finished.");
+            }
+            if (snapshot.isFailed()) {
+                throw new IllegalStateException(
+                        "Cannot resume a FAILED execution '" + executionId
+                                + "'. Call proceed() to retry failed sub-steps.");
+            }
+            if (snapshot.isWaiting()) {
+                return ManagedTransitionResult.<C>builder()
+                        .executionId(executionId)
+                        .fromState(snapshot.getCurrentStateName())
+                        .toState(snapshot.getCurrentStateName())
+                        .executionStatus(ExecutionStatus.RUNNING)
+                        .build();
+            }
+
+            if (!isInterrupted(snapshot)) {
+                return ManagedTransitionResult.<C>builder()
+                        .executionId(executionId)
+                        .fromState(snapshot.getCurrentStateName())
+                        .toState(snapshot.getCurrentStateName())
+                        .executionStatus(ExecutionStatus.RUNNING)
+                        .build();
+            }
+
+            C ctx = resolveContext(executionId, null);
+            StateMachineInstance<C> instance =
+                    definition.resumeInterrupted(ctx, snapshot, repository);
+            String fromState = instance.currentState().name();
+
+            try {
+                instance.resume();
+                return ManagedTransitionResult.<C>builder()
+                        .executionId(instance.executionId())
+                        .fromState(fromState)
+                        .toState(instance.currentState().name())
+                        .executionStatus(instance.status())
+                        .context(instance.context())
+                        .build();
+            } catch (SubStepExecutionException e) {
+                return ManagedTransitionResult.<C>builder()
+                        .executionId(instance.executionId())
+                        .fromState(fromState)
+                        .toState(instance.currentState().name())
+                        .executionStatus(ExecutionStatus.FAILED)
+                        .failedStateName(e.getStateName())
+                        .failedSubStepName(e.getSubStepName())
+                        .rootCause(e.getCause())
+                        .context(instance.context())
+                        .build();
+            }
+        } finally {
+            releaseLock(executionId, lock);
+        }
+    }
+
+    /**
+     * Resume all interrupted executions in parallel using the consumer-supplied executor.
+     * <p>
+     * <strong>Requires a {@code recoveryExecutor} configured on the builder.</strong>
+     * Throws {@link IllegalStateException} if none is configured; use
+     * {@link #resume(String)} per execution instead, or configure one via
+     * {@link io.hypercell.fsm.builder.StateMachineBuilder#recoveryExecutor(java.util.concurrent.ExecutorService)}.
+     * <p>
+     * This method is <strong>single-instance only</strong>. Do not call it in a
+     * multi-replica deployment — a starting node could resume an execution being
+     * processed by a live peer. Multi-replica deployments should rely on lazy resume.
+     * <p>
+     * Implementation: keyset-paginate {@code listInterrupted(limit, afterId)} to collect
+     * all interrupted execution IDs (stable under concurrent status flips as those rows
+     * flip to WAITING/TERMINATED and fall out of future pages), submit each to the executor,
+     * and return the total submitted count immediately (async).
+     *
+     * @return the number of resume tasks submitted (executions may still be in-flight)
+     * @throws IllegalStateException if no {@code recoveryExecutor} is configured
+     */
+    @Override
+    public int recoverInterruptedExecutions() {
+        java.util.concurrent.ExecutorService executor = definition.recoveryExecutor();
+        if (executor == null) {
+            throw new IllegalStateException(
+                    "recoverInterruptedExecutions requires a recoveryExecutor; configure one on "
+                            + "the builder via .recoveryExecutor(executor), or use resume(executionId) "
+                            + "per execution");
+        }
+
+        final int PAGE = definition.recoveryPageSize();
+        int toBeRecovered = 0;
+        String lastId = null;
+        List<ExecutionSnapshot> page;
+        do {
+            page = repository.listInterrupted(PAGE, lastId);
+            if (page.isEmpty()) break;
+            for (ExecutionSnapshot s : page) {
+                executor.submit(() -> {
+                    try {
+                        var result = resume(s.getExecutionId());
+                        if (result.isFailed()) {
+                            log.error("[recoverInterruptedExecutions] Failed to recover '{}': {}",
+                                    s.getExecutionId(), result.getRootCause().getMessage(), result.getRootCause());
+                        }
+                    } catch (Exception e) {
+                        log.error("[recoverInterruptedExecutions] Failed to recover '{}': {}",
+                                s.getExecutionId(), e.getMessage(), e);
+                    }
+                });
+            }
+            toBeRecovered += page.size();
+            lastId = page.get(page.size() - 1).getExecutionId();
+        } while (page.size() == PAGE);
+
+        return toBeRecovered;
     }
 
     @Override
@@ -168,26 +316,51 @@ public class DefaultStateMachineManager<C> implements StateMachineManager<C> {
         }
     }
 
+    /**
+     * Returns {@code true} when the snapshot was interrupted mid-transition
+     * (process crashed while sub-steps were executing).
+     * <p>
+     * With the new persisted-status model, {@code RUNNING} means exclusively
+     * "actively processing sub-steps". A crash leaves the snapshot in this state;
+     * an at-rest execution is now saved as {@code WAITING}. Therefore, interrupted
+     * detection is a simple status check.
+     *
+     * @param snapshot a snapshot whose status has already been checked (callers pass RUNNING snapshots)
+     * @return {@code true} if the execution was interrupted, {@code false} otherwise
+     */
+    private boolean isInterrupted(ExecutionSnapshot snapshot) {
+        return snapshot.getStatus() == SnapshotStatus.RUNNING;
+    }
+
     private ManagedTransitionResult<C> doTrigger(String executionId, String event,
                                                  C contextOverride) {
         Optional<ExecutionSnapshot> snapshotOpt = repository.load(executionId);
-        C ctx = resolveContext(executionId, contextOverride);
 
         if (snapshotOpt.isEmpty()) {
+            C ctx = resolveContext(executionId, contextOverride);
             return firstTrigger(executionId, event, ctx);
         }
 
         ExecutionSnapshot snapshot = snapshotOpt.get();
 
-        if (snapshot.isCompleted()) {
-            throw new CompletedMachineException(
-                    executionId, snapshot.getCurrentStateName());
+        if (snapshot.isTerminated()) {
+            throw new CompletedMachineException(executionId, snapshot.getCurrentStateName());
         }
 
         if (snapshot.isFailed()) {
-            return proceedThenTrigger(executionId, event, ctx, snapshot);
+            throw IllegalTriggerStateException.failed(
+                    executionId, event, snapshot.getCurrentStateName());
         }
 
+        if (snapshot.getStatus() == SnapshotStatus.RETRY_SCHEDULED) {
+            throw IllegalTriggerStateException.retryScheduled(executionId, event);
+        }
+
+        if (snapshot.isRunning()) {
+            throw IllegalTriggerStateException.running(executionId, event);
+        }
+
+        C ctx = resolveContext(executionId, contextOverride);
         return reconstituteThenTrigger(executionId, event, ctx, snapshot);
     }
 
@@ -215,46 +388,18 @@ public class DefaultStateMachineManager<C> implements StateMachineManager<C> {
                     .build();
         }
 
-        return executeTrigger(instance, event, fromState, false);
+        return executeTrigger(instance, event, fromState);
     }
 
     /**
-     * FAILED snapshot + new event.
-     * Auto-proceeds (retrying failed sub-steps, skipping completed ones),
-     * then fires the new event if proceed() succeeds.
-     */
-    private ManagedTransitionResult<C> proceedThenTrigger(String executionId, String event,
-                                                          C ctx, ExecutionSnapshot snapshot) {
-        StateMachineInstance<C> instance = definition.resume(ctx, snapshot, repository);
-        String fromState = instance.currentState().name();
-
-        try {
-            instance.proceed();
-        } catch (SubStepExecutionException e) {
-            return ManagedTransitionResult.<C>builder()
-                    .executionId(executionId)
-                    .fromState(fromState)
-                    .toState(fromState)
-                    .executionStatus(ExecutionStatus.FAILED)
-                    .proceededFromFailure(true)
-                    .failedStateName(e.getStateName())
-                    .failedSubStepName(e.getSubStepName())
-                    .rootCause(e.getCause())
-                    .build();
-        }
-
-        return executeTrigger(instance, event, fromState, true);
-    }
-
-    /**
-     * RUNNING snapshot — process restarted between requests.
+     * WAITING snapshot — normal next-event path.
      * Reconstitutes at currentStateName and fires the event.
      */
     private ManagedTransitionResult<C> reconstituteThenTrigger(String executionId, String event,
                                                                C ctx, ExecutionSnapshot snapshot) {
         StateMachineInstance<C> instance = definition.reconstitute(ctx, snapshot, repository);
         String fromState = instance.currentState().name();
-        return executeTrigger(instance, event, fromState, false);
+        return executeTrigger(instance, event, fromState);
     }
 
     /**
@@ -263,8 +408,7 @@ public class DefaultStateMachineManager<C> implements StateMachineManager<C> {
      * inside handleFailure() so we just build a FAILED result.
      */
     private ManagedTransitionResult<C> executeTrigger(StateMachineInstance<C> instance,
-                                                      String event, String fromState,
-                                                      boolean proceededFromFailure) {
+                                                      String event, String fromState) {
         try {
             instance.trigger(event);
             return ManagedTransitionResult.<C>builder()
@@ -272,7 +416,6 @@ public class DefaultStateMachineManager<C> implements StateMachineManager<C> {
                     .fromState(fromState)
                     .toState(instance.currentState().name())
                     .executionStatus(instance.status())
-                    .proceededFromFailure(proceededFromFailure)
                     .context(instance.context())
                     .build();
         } catch (SubStepExecutionException e) {
@@ -281,7 +424,6 @@ public class DefaultStateMachineManager<C> implements StateMachineManager<C> {
                     .fromState(fromState)
                     .toState(instance.currentState().name())
                     .executionStatus(ExecutionStatus.FAILED)
-                    .proceededFromFailure(proceededFromFailure)
                     .failedStateName(e.getStateName())
                     .failedSubStepName(e.getSubStepName())
                     .rootCause(e.getCause())
@@ -298,7 +440,7 @@ public class DefaultStateMachineManager<C> implements StateMachineManager<C> {
                 .orElseThrow(() -> new IllegalArgumentException(
                         "No snapshot found for executionId: " + executionId));
 
-        if (snapshot.isCompleted()) {
+        if (snapshot.isTerminated()) {
             throw new CompletedMachineException(executionId, snapshot.getCurrentStateName());
         }
         if (!snapshot.isFailed()) {
@@ -341,7 +483,7 @@ public class DefaultStateMachineManager<C> implements StateMachineManager<C> {
         Optional<ExecutionSnapshot> existing = repository.load(executionId);
         if (existing.isPresent()) {
             ExecutionSnapshot snapshot = existing.get();
-            if (snapshot.isCompleted()) {
+            if (snapshot.isTerminated()) {
                 throw new CompletedMachineException(
                         executionId, snapshot.getCurrentStateName());
             }

@@ -115,7 +115,7 @@ class ExecutionSnapshotTest {
         assertThat(checkpoint.getCurrentStateName()).isEqualTo("PROCESSING");
         assertThat(checkpoint.getStatus()).isEqualTo(SnapshotStatus.RUNNING);
         assertThat(checkpoint.isRunning()).isTrue();
-        assertThat(checkpoint.getCompletedSubStepResults()).containsKey("reserve");
+        assertThat(checkpoint.getCompletedSubStepResults()).containsKey("PROCESSING::reserve");
     }
 
     @Test
@@ -133,11 +133,22 @@ class ExecutionSnapshotTest {
     void statusPredicates_reflectSnapshotStatus() {
         ExecutionSnapshot running = new ExecutionSnapshot.Builder()
                 .executionId("e").status(SnapshotStatus.RUNNING).capturedAt(Instant.now()).build();
-        ExecutionSnapshot completed = new ExecutionSnapshot.Builder()
-                .executionId("e").status(SnapshotStatus.COMPLETED).capturedAt(Instant.now()).build();
+        ExecutionSnapshot waiting = new ExecutionSnapshot.Builder()
+                .executionId("e").status(SnapshotStatus.WAITING).capturedAt(Instant.now()).build();
+        ExecutionSnapshot terminated = new ExecutionSnapshot.Builder()
+                .executionId("e").status(SnapshotStatus.TERMINATED).capturedAt(Instant.now()).build();
 
         assertThat(running.isRunning()).isTrue();
         assertThat(running.isFailed()).isFalse();
-        assertThat(completed.isCompleted()).isTrue();
+        assertThat(running.isWaiting()).isFalse();
+        assertThat(running.isTerminated()).isFalse();
+
+        assertThat(waiting.isWaiting()).isTrue();
+        assertThat(waiting.isRunning()).isFalse();
+        assertThat(waiting.isTerminated()).isFalse();
+
+        assertThat(terminated.isTerminated()).isTrue();
+        assertThat(terminated.isRunning()).isFalse();
+        assertThat(terminated.isWaiting()).isFalse();
     }
 }

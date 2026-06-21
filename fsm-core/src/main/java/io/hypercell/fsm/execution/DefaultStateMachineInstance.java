@@ -79,7 +79,9 @@ public class DefaultStateMachineInstance<C> implements StateMachineInstance<C> {
                 executionId, definition.id(), initialState.name()));
 
         if (!initialState.subSteps().isEmpty()) {
-            SubStepRunResult result = subStepRunner.run(initialState, ctx, executionRecord);
+            saveCheckpoint();
+            SubStepRunResult result = subStepRunner.run(
+                    initialState, ctx, executionRecord, this::saveCheckpoint);
             if (result.isFailed()) {
                 handleFailure(initialState.name(), result.getFailedSubStepName(),
                         result.getError(), null);
@@ -91,7 +93,7 @@ public class DefaultStateMachineInstance<C> implements StateMachineInstance<C> {
         checkTerminal(initialState);
 
         if (executionStatus == ExecutionStatus.RUNNING) {
-            saveCheckpoint();
+            saveAtRestCheckpoint();
         }
     }
 
@@ -166,7 +168,9 @@ public class DefaultStateMachineInstance<C> implements StateMachineInstance<C> {
                 executionId, definition.id(), nextState.name()));
 
         if (!nextState.subSteps().isEmpty()) {
-            SubStepRunResult runResult = subStepRunner.run(nextState, ctx, executionRecord);
+            saveCheckpoint();
+            SubStepRunResult runResult = subStepRunner.run(
+                    nextState, ctx, executionRecord, this::saveCheckpoint);
             if (runResult.isFailed()) {
                 handleFailure(nextState.name(), runResult.getFailedSubStepName(),
                         runResult.getError(), event);
@@ -178,7 +182,7 @@ public class DefaultStateMachineInstance<C> implements StateMachineInstance<C> {
         checkTerminal(nextState);
 
         if (executionStatus == ExecutionStatus.RUNNING) {
-            saveCheckpoint();
+            saveAtRestCheckpoint();
         }
 
         return nextState;
@@ -200,11 +204,46 @@ public class DefaultStateMachineInstance<C> implements StateMachineInstance<C> {
         executionRecord.clearFailure();
         executionStatus = ExecutionStatus.RUNNING;
 
+        return runRemainingSubSteps(executionRecord.getLastTriggerEvent());
+    }
+
+    /**
+     * Resume an interrupted {@code RUNNING} execution by completing the remaining
+     * sub-steps of the current state, skipping those that have already been checkpointed.
+     * <p>
+     * This is distinct from {@link #proceed()}: it does <em>not</em> require {@code FAILED}
+     * status, does not emit a {@code MachineResumedEvent}, and does not re-run the transition
+     * action or entry/exit hooks — those already completed before the crash. It simply picks up
+     * sub-step execution from where it was interrupted.
+     *
+     * @return the current state after sub-steps complete (may be RUNNING or COMPLETED)
+     * @throws InvalidEventException     if the status is not {@code RUNNING}
+     * @throws SubStepExecutionException if a remaining sub-step fails
+     */
+    @Override
+    public StateDefinition<C> resume() {
+        if (executionStatus != ExecutionStatus.RUNNING) {
+            throw new InvalidEventException(
+                    "resume() can only be called when status is RUNNING. Current: " + executionStatus);
+        }
+        return runRemainingSubSteps(executionRecord.getLastTriggerEvent());
+    }
+
+    /**
+     * Shared logic: run (or skip) the sub-steps of {@link #currentState}, then
+     * {@link #checkTerminal} and {@link #saveCheckpoint}.
+     * Used by both {@link #proceed()} and {@link #resume()}.
+     *
+     * @param pendingEvent the event in-flight at the time of a failure, or {@code null}
+     * @return the current state after all sub-steps have been processed
+     */
+    private StateDefinition<C> runRemainingSubSteps(String pendingEvent) {
         if (!currentState.subSteps().isEmpty()) {
-            SubStepRunResult runResult = subStepRunner.run(currentState, ctx, executionRecord);
+            SubStepRunResult runResult = subStepRunner.run(
+                    currentState, ctx, executionRecord, this::saveCheckpoint);
             if (runResult.isFailed()) {
                 handleFailure(currentState.name(), runResult.getFailedSubStepName(),
-                        runResult.getError(), executionRecord.getLastTriggerEvent());
+                        runResult.getError(), pendingEvent);
                 throw new SubStepExecutionException(
                         currentState.name(), runResult.getFailedSubStepName(), runResult.getError());
             }
@@ -213,7 +252,7 @@ public class DefaultStateMachineInstance<C> implements StateMachineInstance<C> {
         checkTerminal(currentState);
 
         if (executionStatus == ExecutionStatus.RUNNING) {
-            saveCheckpoint();
+            saveAtRestCheckpoint();
         }
 
         return currentState;
@@ -235,18 +274,36 @@ public class DefaultStateMachineInstance<C> implements StateMachineInstance<C> {
         return ExecutionSnapshot.checkpoint(executionRecord, definition.id());
     }
 
+    /**
+     * Per-sub-step checkpoint — called by the {@code onStepCommitted} callback inside
+     * {@link SubStepRunner} after each successfully executed sub-step. Persists status
+     * {@code RUNNING} (the default from {@link ExecutionSnapshot#checkpoint}) so the startup
+     * sweep can identify interrupted executions via a cheap indexed query.
+     */
     private void saveCheckpoint() {
         if (snapshotRepository != null) {
             snapshotRepository.save(executionId, takeCheckpoint());
         }
     }
 
+    /**
+     * End-of-transition at-rest save — called after all sub-steps of a non-terminal state
+     * have completed. Persists status {@code WAITING} to signal that the machine is parked
+     * awaiting the next event (not interrupted). This differentiates at-rest executions from
+     * genuinely interrupted ones in the startup sweep.
+     */
+    private void saveAtRestCheckpoint() {
+        if (snapshotRepository != null) {
+            snapshotRepository.save(executionId, takeCheckpoint().withStatus(SnapshotStatus.WAITING));
+        }
+    }
+
     private void checkTerminal(StateDefinition<C> state) {
         if (state.isTerminal()) {
-            executionRecord.markCompleted();
-            executionStatus = ExecutionStatus.COMPLETED;
+            executionRecord.markTerminated();
+            executionStatus = ExecutionStatus.TERMINATED;
             if (snapshotRepository != null) {
-                snapshotRepository.save(executionId, takeCheckpoint().withStatus(SnapshotStatus.COMPLETED));
+                snapshotRepository.save(executionId, takeCheckpoint().withStatus(SnapshotStatus.TERMINATED));
             }
             eventBus.publish(new MachineEvent.MachineCompletedEvent<>(
                     executionId, definition.id(), state.name()));
@@ -331,8 +388,8 @@ public class DefaultStateMachineInstance<C> implements StateMachineInstance<C> {
     }
 
     @Override
-    public boolean isCompleted() {
-        return executionStatus == ExecutionStatus.COMPLETED;
+    public boolean isTerminated() {
+        return executionStatus == ExecutionStatus.TERMINATED;
     }
 
     @Override

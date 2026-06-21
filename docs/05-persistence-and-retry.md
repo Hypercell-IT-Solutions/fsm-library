@@ -105,31 +105,44 @@ This keeps sub-steps independently retryable and the resume mechanism predictabl
 
 ## SnapshotStatus lifecycle
 
-The snapshot has its own status, separate from `ExecutionStatus` (the live instance status). It tracks what is happening to a failed execution between request boundaries.
+The snapshot has its own status, separate from `ExecutionStatus` (the live instance status). The persisted status encodes precisely where in its lifecycle a workflow is at rest between request boundaries.
 
 ```
-      machine fails
-           │
-           ▼
-        FAILED ─────────── manualRetry() called ──────────────────► RUNNING
-           │                                                             │
-           │ RetryPolicy.shouldRetry() == true                           │
-           ▼                                                             │
-    RETRY_SCHEDULED ──── scheduled retry fires ───────────────────► RUNNING
-                                                                         │
-                                                    ┌────────────────────┤
-                                                    │                    │
-                                               retry fails          retry succeeds
-                                                    │                    │
-                                                    ▼                    ▼
-                                                 FAILED             COMPLETED
-                                                                   (snapshot retained)
+   (new execution)
+        │ initial state entered / sub-steps run
+        ▼
+     RUNNING ──── sub-steps done, non-terminal ──────────────────────► WAITING
+        │                                                                  │
+        │ sub-step fails                                          next event arrives
+        ▼                                                                  │
+      FAILED ◄──────────────── retry also fails ──────────────── RUNNING (retry)
+        │                                                                  │
+        │ RetryPolicy.shouldRetry() == true                        retry succeeds
+        ▼                                                                  │
+  RETRY_SCHEDULED ─── scheduled retry fires ──────────────────────────────┤
+                                                                           │
+                                              terminal state reached       │
+                                                      ▼                   │
+                                                  TERMINATED ◄────────────┘
+                                              (snapshot retained)
 ```
+
+**Precise meanings:**
+
+| Status | Meaning |
+|---|---|
+| `RUNNING` | Execution is **actively processing sub-steps**. A crash leaves the snapshot here. The startup sweep queries `WHERE status = 'RUNNING'` to find interrupted executions cheaply via the status index. |
+| `WAITING` | Sub-steps completed; machine is **parked at a non-terminal state** awaiting the next event. This is the normal at-rest status between two transitions. `listInterrupted()` never returns `WAITING` rows. |
+| `TERMINATED` | A terminal state was reached successfully. The snapshot is retained so that subsequent `trigger()` or `proceed()` calls correctly throw `CompletedMachineException`. Call `repository.delete(executionId)` to clean up. |
+| `FAILED` | A sub-step failed; waiting for manual or scheduled retry. |
+| `RETRY_SCHEDULED` | An automatic retry has been scheduled. Do not call `manualRetry()` here; the scheduled retry will fire. Cancel it first if you must force an immediate retry. |
 
 Key rules:
-- **`RETRY_SCHEDULED`** — do not call `manualRetry()` while here; the scheduled retry will fire. If you must cancel it, cancel the retry via the scheduler before calling `manualRetry()`.
-- **`RUNNING`** — a retry is actively executing. `manualRetry()` throws `ConcurrentRetryException`.
-- **`COMPLETED`** — execution finished. The snapshot is retained with this status so that subsequent `trigger()` or `proceed()` calls correctly throw `CompletedMachineException`. Call `repository.delete(executionId)` to clean up when you no longer need the record.
+- **`RETRY_SCHEDULED`** — do not call `manualRetry()` while here; the scheduled retry will fire. If you must cancel it, cancel the retry via the scheduler before calling `manualRetry()`. `trigger()` throws `IllegalTriggerStateException` on RETRY_SCHEDULED.
+- **`RUNNING`** — execution is actively processing sub-steps. A crash leaves the snapshot here; `listInterrupted()` returns these rows for the startup sweep. `trigger()` throws `IllegalTriggerStateException` on RUNNING — call `resume()` first.
+- **`WAITING`** — normal at-rest status; the machine is parked between transitions. These rows are NOT returned by `listInterrupted()`. This is the only non-absent state where `trigger()` succeeds.
+- **`FAILED`** — `trigger()` throws `IllegalTriggerStateException` — call `proceed()` first.
+- **`TERMINATED`** — execution finished. The snapshot is retained with this status so that subsequent `trigger()` or `proceed()` calls correctly throw `CompletedMachineException`. Call `repository.delete(executionId)` to clean up when you no longer need the record.
 
 ---
 
@@ -350,6 +363,8 @@ public interface RetryScheduler {
                            back to step 2
 ```
 
+Note: in the diagram above, "retry succeeds" sets `SnapshotStatus.TERMINATED` (not `COMPLETED` — that name was retired in 1.0.0-RC2).
+
 ### attempt number increment
 
 `attemptNumber` is incremented in `RetryCoordinator.onFailure()` each time a failure occurs. It starts at 1. After 3 failures, `attemptNumber` is 3. `RetryPolicy.shouldRetry(3, error)` is called; if it returns `false`, no more auto-retries occur.
@@ -358,7 +373,127 @@ The attempt number survives process restarts because it is stored in the snapsho
 
 ---
 
-## Startup recovery
+## Crash recovery and per-sub-step checkpointing
+
+### The problem
+
+Before 1.0.0-RC2, a checkpoint was only saved at the *end* of a successful transition. If the process crashed while sub-steps were executing, the already-completed sub-steps were not durably recorded. When the operation was re-driven, those sub-steps would run again — breaking non-idempotent steps (for example, a one-time backend call that fails on the second invocation).
+
+### The fix
+
+Starting with 1.0.0-RC2, the library saves a `RUNNING` checkpoint after **each successfully executed sub-step**. Because `ExecutionSnapshot.checkpoint()` already captures `currentStateName`, `status=RUNNING`, and the map of completed sub-step results, no schema change is required — only the *frequency* of checkpointing changed.
+
+**Idempotency guarantee:** when the process restarts and the interrupted execution is re-driven, `ResumePolicy` skips every sub-step that has a completed entry in the snapshot. Only the sub-steps that had not yet run will execute. The transition action and entry/exit hooks are **not** re-invoked — they already ran before the crash.
+
+### Detecting an interrupted execution
+
+With the new status model, interrupted detection is a simple status check: **an execution is interrupted when its snapshot status is `RUNNING`**. At-rest executions (sub-steps completed, machine parked between transitions) are now saved as `WAITING`, so the startup sweep only needs to query `WHERE status = 'RUNNING'` — a cheap indexed lookup that never returns legitimately parked executions.
+
+### Strict `trigger()` contract (1.0.0-RC2+)
+
+`trigger()` applies **exactly one transition**. It succeeds only when the execution is ready:
+
+| Snapshot status | `trigger()` behaviour |
+|---|---|
+| Absent (no snapshot) | First event — creates a new instance and fires the event. |
+| `WAITING` | Normal next-event path — reconstitutes and fires the event. |
+| `FAILED` | Throws `IllegalTriggerStateException` — call `proceed()` first. |
+| `RETRY_SCHEDULED` | Throws `IllegalTriggerStateException` — wait for the auto-retry. |
+| `RUNNING` (interrupted) | Throws `IllegalTriggerStateException` — call `resume()` first. |
+| `TERMINATED` | Throws `CompletedMachineException`. |
+
+This replaces the old "auto-proceed" and "auto-resume" behaviour where a single `trigger()` call could silently apply two transitions.
+
+### Introspection helpers
+
+Use `eligibilityOf(executionId)` and `currentState(executionId)` as advisory read-only checks before calling `trigger()`:
+
+```java
+import io.hypercell.fsm.manager.TriggerEligibility;
+
+TriggerEligibility eligibility = manager.eligibilityOf("order-42");
+// READY          → trigger() will succeed
+// NEEDS_PROCEED  → call proceed() first (FAILED or RETRY_SCHEDULED)
+// NEEDS_RESUME   → call resume() first (RUNNING / interrupted)
+// TERMINATED     → trigger() would throw CompletedMachineException
+
+Optional<String> state = manager.currentState("order-42");
+// "PENDING", "PROCESSING", etc. — empty if execution doesn't exist yet
+```
+
+> **Advisory only.** A concurrent operation may change status between `eligibilityOf()` and `trigger()`. `trigger()` re-validates authoritatively under its lock and throws if ineligible.
+
+### Explicit recover-then-trigger pattern
+
+```java
+// Check eligibility first (optional but useful for clean HTTP responses)
+TriggerEligibility eligibility = manager.eligibilityOf(orderId);
+switch (eligibility) {
+    case NEEDS_PROCEED -> manager.proceed(orderId);    // retry failed sub-steps
+    case NEEDS_RESUME  -> manager.resume(orderId);     // complete interrupted transition
+    case TERMINATED    -> throw new OrderAlreadyCompletedException(orderId);
+    case READY         -> {} // fall through — trigger() is safe
+}
+
+// Now READY — apply the next event
+ManagedTransitionResult<OrderContext> result = manager.trigger(orderId, event);
+```
+
+### Two recovery paths
+
+#### Explicit lazy resume (always safe, including distributed deployments)
+
+When the loaded snapshot is `RUNNING` (interrupted), `trigger()` throws `IllegalTriggerStateException`. The caller must call `resume()` first, which completes the in-flight transition (skipping already-checkpointed sub-steps). Once `resume()` returns with `WAITING` status, `trigger()` can be called with the next event.
+
+Explicit resume:
+
+```java
+ManagedTransitionResult<OrderContext> result = manager.resume("order-42");
+// result.getExecutionStatus() == RUNNING  if resume completed successfully
+// result.getExecutionStatus() == FAILED   if a remaining sub-step failed during resume
+```
+
+`resume(executionId)` behaviour by status:
+- `RUNNING` → interrupted mid-transition; completes the remaining sub-steps and returns the new state.
+- `WAITING` → at-rest between transitions; no-op, returns the current state.
+- `FAILED` → throws `IllegalStateException`; use `proceed()` instead.
+- `TERMINATED` → throws `IllegalStateException`.
+
+#### Startup sweep (single-instance only, requires configured executor)
+
+For single-instance deployments, you can recover all interrupted executions in parallel at startup. **A `recoveryExecutor` must be configured on the builder** — without one, `recoverInterruptedExecutions()` throws `IllegalStateException`:
+
+```java
+// Configure a recovery executor on the definition
+StateMachineDefinition<OrderContext> definition = StateMachine.<OrderContext>define("order")
+    // ... states, transitions, etc.
+    .recoveryExecutor(Executors.newFixedThreadPool(4))  // consumer owns lifecycle
+    .build();
+
+// Spring Boot example — single-instance only
+@PostConstruct
+void recoverOnStartup() {
+    manager.recoverPendingRetries();          // reschedule FAILED/RETRY_SCHEDULED retries
+    int submitted = manager.recoverInterruptedExecutions();  // async — returns submitted count
+    log.info("Submitted {} interrupted executions for recovery", submitted);
+}
+```
+
+`recoverInterruptedExecutions()`:
+- **Requires** a `recoveryExecutor` on the definition; throws `IllegalStateException` if none is configured. Use `resume(executionId)` per execution as the alternative.
+- Keyset-paginates `repository.listInterrupted(limit, afterId)` to collect all interrupted execution IDs (stable under concurrent status flips as resumed rows flip to `WAITING`/`TERMINATED`).
+- Submits `resume(executionId)` for each to the consumer-supplied executor (best-effort; one failure does not stop others).
+- **Returns the count submitted immediately (async)** — executions may still be in-flight when this method returns.
+
+> **WARNING — single-instance only.** Do **not** call `recoverInterruptedExecutions()` in a multi-replica (clustered) deployment. A starting node could resume an execution that is actively being processed by a live peer, causing duplicate sub-step execution. Multi-replica deployments should rely on **lazy resume** instead: `trigger()` and `resume(executionId)` detect and complete an interrupted execution on the next incoming request, which is inherently safe because the client is re-driving a specific execution it owns.
+
+### Cost
+
+Per-sub-step checkpointing adds one repository write per executed sub-step (vs. one per transition previously). This is required for the idempotency guarantee. In a future release this may be made opt-out per sub-step if write volume is a concern.
+
+---
+
+## Startup recovery (retries)
 
 When the process restarts, retries that were scheduled or in-flight are not automatically resumed. Call `manager.recoverPendingRetries()` once on startup:
 

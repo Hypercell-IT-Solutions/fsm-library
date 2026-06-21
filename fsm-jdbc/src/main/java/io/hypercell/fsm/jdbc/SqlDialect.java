@@ -60,4 +60,19 @@ public interface SqlDialect {
      * @return the fully formed upsert SQL string
      */
     String upsertSql(String tableName);
+
+    /**
+     * Return the row-limiting clause appended to the end of a {@code SELECT} (after
+     * {@code ORDER BY}) to cap the number of returned rows.
+     *
+     * <p>The default {@code LIMIT n} works on PostgreSQL, MySQL, H2 and SQLite. Oracle does
+     * not support {@code LIMIT} and overrides this with {@code FETCH FIRST n ROWS ONLY}
+     * (Oracle 12c+).
+     *
+     * @param limit the maximum number of rows
+     * @return the limiting clause, e.g. {@code "LIMIT 100"}
+     */
+    default String limitClause(int limit) {
+        return "LIMIT " + limit;
+    }
 }

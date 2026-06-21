@@ -5,11 +5,11 @@ package io.hypercell.fsm.core;
  * <p>
  * Valid transitions between statuses:
  * <p>
- * RUNNING → COMPLETED  (terminal state reached, all sub-steps passed)
+ * RUNNING → TERMINATED (terminal state reached, all sub-steps passed)
  * RUNNING → FAILED     (a sub-step or hook threw/returned failed)
  * FAILED  → RUNNING    (proceed() called to resume from failure point)
  * <p>
- * A COMPLETED or permanently FAILED (exhausted retries) machine cannot be
+ * A TERMINATED or permanently FAILED (exhausted retries) machine cannot be
  * transitioned further. Calling trigger() on a non-RUNNING machine throws.
  */
 public enum ExecutionStatus {
@@ -22,7 +22,7 @@ public enum ExecutionStatus {
     /**
      * A terminal state was reached. trigger() will throw.
      */
-    COMPLETED,
+    TERMINATED,
 
     /**
      * A sub-step or hook failed. The snapshot has been saved.

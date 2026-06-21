@@ -7,6 +7,7 @@ import io.hypercell.fsm.resume.SnapshotRepository;
 import io.hypercell.fsm.retry.RetryCoordinator;
 
 import java.util.List;
+import java.util.concurrent.ExecutorService;
 
 /**
  * The immutable, validated blueprint of a state machine.
@@ -88,6 +89,25 @@ public interface StateMachineDefinition<C> {
      * on every request and by the retry coordinator on auto-retries.
      */
     ContextLoader<C> contextLoader();
+
+    /**
+     * The consumer-supplied executor used by
+     * {@link StateMachineManager#recoverInterruptedExecutions()} to resume interrupted
+     * executions in parallel. Returns {@code null} if none was configured.
+     * <p>
+     * The consumer owns this executor's lifecycle — the library never shuts it down.
+     * {@code recoverInterruptedExecutions()} throws {@link IllegalStateException} if this
+     * returns {@code null}.
+     */
+    ExecutorService recoveryExecutor();
+
+    /**
+     * The page size used by {@link StateMachineManager#recoverInterruptedExecutions()} when
+     * keyset-paginating interrupted executions from the repository. Defaults to {@code 100}.
+     *
+     * @return the recovery page size; always {@code > 0}
+     */
+    int recoveryPageSize();
 
     /**
      * Create a fresh instance starting at the initial state.
@@ -175,4 +195,28 @@ public interface StateMachineDefinition<C> {
      */
     StateMachineInstance<C> resume(C ctx, ExecutionSnapshot snapshot,
                                    SnapshotRepository repository);
+
+    /**
+     * Reconstitute an execution that was interrupted mid-transition (process crashed while
+     * sub-steps were executing). The snapshot status is {@code RUNNING} but not all sub-steps
+     * of the current state have completed entries in {@code completedSubStepResults}.
+     * <p>
+     * The returned instance is anchored at {@code snapshot.getCurrentStateName()} with status
+     * {@code RUNNING} and the execution record pre-populated with the completed sub-steps,
+     * enabling the {@link io.hypercell.fsm.resume.ResumePolicy} to skip them when
+     * {@link StateMachineInstance#resume()} runs the remaining steps.
+     * <p>
+     * Unlike {@link #resume(Object, ExecutionSnapshot, SnapshotRepository)}, this method
+     * does <em>not</em> mark the record as failed — the in-flight transition simply has
+     * remaining work to complete.
+     *
+     * @param ctx        a fresh context loaded for this execution
+     * @param snapshot   a {@code RUNNING} snapshot where not all sub-steps are yet complete
+     * @param repository where subsequent checkpoints are saved; may be {@code null}
+     * @return an instance ready for {@link StateMachineInstance#resume()} to be called
+     */
+    default StateMachineInstance<C> resumeInterrupted(C ctx, ExecutionSnapshot snapshot,
+                                                      SnapshotRepository repository) {
+        return reconstitute(ctx, snapshot, repository);
+    }
 }

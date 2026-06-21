@@ -35,7 +35,21 @@ public class SubStepRunner<C> {
         this.machineId = machineId;
     }
 
-    public SubStepRunResult run(StateDefinition<C> state, C ctx, ExecutionRecord executionRecord) {
+    /**
+     * Run all sub-steps of the given state, skipping completed ones via the resume policy.
+     * <p>
+     * After each freshly executed sub-step succeeds, {@code onStepCommitted} is invoked so the
+     * caller can persist a mid-transition checkpoint. The callback is <em>not</em> invoked for
+     * skipped steps (already durable) or failed steps (the caller handles failure separately).
+     *
+     * @param state           the state whose sub-steps are to be executed
+     * @param ctx             the mutable context passed to each sub-step action
+     * @param executionRecord the live execution log; updated in-place for each step
+     * @param onStepCommitted called once after each freshly completed sub-step; never {@code null}
+     * @return a result indicating overall completion or the first failure
+     */
+    public SubStepRunResult run(StateDefinition<C> state, C ctx, ExecutionRecord executionRecord,
+                                Runnable onStepCommitted) {
 
         for (SubStepDefinition<C> subStep : state.subSteps()) {
 
@@ -72,6 +86,8 @@ public class SubStepRunner<C> {
                 return SubStepRunResult.failed(subStep.name(),
                         new RuntimeException(result.getErrorMessage()));
             }
+
+            onStepCommitted.run();
 
             eventBus.publish(new MachineEvent.SubStepCompletedEvent<>(
                     executionId, machineId, state.name(), subStep.name(), result));

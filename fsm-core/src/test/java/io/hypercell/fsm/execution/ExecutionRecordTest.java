@@ -63,12 +63,12 @@ class ExecutionRecordTest {
     }
 
     @Test
-    void markCompleted_clearsFailureFields() {
+    void markTerminated_clearsFailureFields() {
         ExecutionRecord record = new ExecutionRecord("exec-1", "DONE");
         record.markFailed("DONE", "step-x");
-        record.markCompleted();
+        record.markTerminated();
 
-        assertThat(record.getStatus()).isEqualTo(ExecutionStatus.COMPLETED);
+        assertThat(record.getStatus()).isEqualTo(ExecutionStatus.TERMINATED);
         assertThat(record.getFailedStateName()).isNull();
         assertThat(record.getFailedSubStepName()).isNull();
     }

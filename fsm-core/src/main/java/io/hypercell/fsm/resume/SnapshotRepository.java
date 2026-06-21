@@ -55,4 +55,29 @@ public interface SnapshotRepository {
      * on startup.
      */
     List<ExecutionSnapshot> listPendingRetries();
+
+    /**
+     * Return a page of interrupted executions (those with status {@code RUNNING}).
+     * <p>
+     * With the new status model, {@code RUNNING} means exclusively "actively processing
+     * sub-steps" — a crash leaves the snapshot here. At-rest executions are now saved as
+     * {@code WAITING}, so this query returns only genuinely interrupted rows (cheap indexed
+     * scan).
+     * <p>
+     * Results are ordered by {@code executionId} ascending and keyset-paginated: pass the
+     * last seen {@code executionId} as {@code afterExecutionId} (or {@code null} for the
+     * first page). The caller keeps paginating until the returned list is smaller than
+     * {@code limit}.
+     * <p>
+     * An implementation that does not support the interrupted-execution startup sweep
+     * ({@code recoverInterruptedExecutions()}) may simply return an empty list. Lazy
+     * recovery via {@code resume(executionId)} does not depend on this method.
+     *
+     * @param limit            maximum number of rows to return per page (must be &gt; 0)
+     * @param afterExecutionId exclusive lower bound for keyset pagination; {@code null}
+     *                         means start from the beginning
+     * @return at most {@code limit} {@code RUNNING} snapshots ordered by execution ID;
+     * never {@code null}
+     */
+    List<ExecutionSnapshot> listInterrupted(int limit, String afterExecutionId);
 }

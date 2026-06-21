@@ -13,6 +13,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -73,7 +74,7 @@ class SynchronousWorkflowIT {
 
         instance.trigger("COMPLETE");
         assertThat(instance.currentState().name()).isEqualTo("SHIPPED");
-        assertThat(instance.status()).isEqualTo(ExecutionStatus.COMPLETED);
+        assertThat(instance.status()).isEqualTo(ExecutionStatus.TERMINATED);
         assertThat(instance.isInTerminalState()).isTrue();
     }
 
@@ -82,7 +83,7 @@ class SynchronousWorkflowIT {
         StateMachineInstance<OrderContext> instance = definition.newInstance(new OrderContext("o1"), "o1");
         instance.trigger("CANCEL");
         assertThat(instance.currentState().name()).isEqualTo("CANCELLED");
-        assertThat(instance.status()).isEqualTo(ExecutionStatus.COMPLETED);
+        assertThat(instance.status()).isEqualTo(ExecutionStatus.TERMINATED);
     }
 
     @Test
@@ -123,6 +124,8 @@ class SynchronousWorkflowIT {
     @Test
     void proceed_skipsCompletedSteps() {
         List<String> executedOnResume = new ArrayList<>();
+        // Tracks whether step-fail has already been attempted once (survives the executedOnResume.clear() below).
+        AtomicBoolean stepFailAttempted = new AtomicBoolean(false);
         StateMachineDefinition<OrderContext> resumeDef = StateMachine.<OrderContext>define("order-resume")
                 .initial("PENDING")
                 .snapshotRepository(repo)
@@ -132,8 +135,8 @@ class SynchronousWorkflowIT {
                     return ActionResult.success();
                 })
                 .subStep("step-fail", ctx -> {
-                    if (executedOnResume.contains("step-fail")) return ActionResult.success();
                     executedOnResume.add("step-fail");
+                    if (stepFailAttempted.getAndSet(true)) return ActionResult.success();
                     throw new RuntimeException("first failure");
                 })
                 .on("GO").to("DONE").end()

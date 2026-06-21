@@ -109,10 +109,10 @@ class JdbcSnapshotRepositoryTest {
                 .executionId("running-1").machineDefinitionId("order")
                 .currentStateName("PROCESSING")
                 .status(SnapshotStatus.RUNNING).capturedAt(Instant.now()).build());
-        repo.save("completed-1", new ExecutionSnapshot.Builder()
-                .executionId("completed-1").machineDefinitionId("order")
+        repo.save("terminated-1", new ExecutionSnapshot.Builder()
+                .executionId("terminated-1").machineDefinitionId("order")
                 .currentStateName("SHIPPED")
-                .status(SnapshotStatus.COMPLETED).capturedAt(Instant.now()).build());
+                .status(SnapshotStatus.TERMINATED).capturedAt(Instant.now()).build());
 
         List<ExecutionSnapshot> pending = repo.listPendingRetries();
 
@@ -164,6 +164,77 @@ class JdbcSnapshotRepositoryTest {
             assertThat(loaded.getScheduledRetryAt()).isNull();
             assertThat(loaded.getCapturedAt()).isNotNull();
         });
+    }
+
+    @Test
+    void listInterrupted_returnsOnlyRunningRows_notWaitingOrTerminated() {
+        // Insert snapshots with different statuses
+        repo.save("running-1", new ExecutionSnapshot.Builder()
+                .executionId("running-1").machineDefinitionId("order")
+                .currentStateName("PROCESSING")
+                .status(SnapshotStatus.RUNNING).capturedAt(Instant.now()).build());
+        repo.save("running-2", new ExecutionSnapshot.Builder()
+                .executionId("running-2").machineDefinitionId("order")
+                .currentStateName("PROCESSING")
+                .status(SnapshotStatus.RUNNING).capturedAt(Instant.now()).build());
+        repo.save("failed-1", failedSnapshot("failed-1"));
+        repo.save("terminated-1", new ExecutionSnapshot.Builder()
+                .executionId("terminated-1").machineDefinitionId("order")
+                .currentStateName("SHIPPED")
+                .status(SnapshotStatus.TERMINATED).capturedAt(Instant.now()).build());
+        repo.save("waiting-1", new ExecutionSnapshot.Builder()
+                .executionId("waiting-1").machineDefinitionId("order")
+                .currentStateName("PROCESSING")
+                .status(SnapshotStatus.WAITING).capturedAt(Instant.now()).build());
+        repo.save("retry-1", failedSnapshot("retry-1")
+                .withScheduledRetryAt(Instant.now().plusSeconds(60)));
+
+        List<ExecutionSnapshot> interrupted = repo.listInterrupted(10, null);
+
+        assertThat(interrupted).hasSize(2);
+        assertThat(interrupted).extracting(ExecutionSnapshot::getExecutionId)
+                .containsExactlyInAnyOrder("running-1", "running-2");
+        assertThat(interrupted).allMatch(ExecutionSnapshot::isRunning);
+    }
+
+    @Test
+    void listInterrupted_emptyWhenNoRunningRows() {
+        repo.save("failed-1", failedSnapshot("failed-1"));
+        repo.save("waiting-1", new ExecutionSnapshot.Builder()
+                .executionId("waiting-1").machineDefinitionId("order")
+                .currentStateName("PROCESSING")
+                .status(SnapshotStatus.WAITING).capturedAt(Instant.now()).build());
+
+        List<ExecutionSnapshot> interrupted = repo.listInterrupted(10, null);
+
+        assertThat(interrupted).isEmpty();
+    }
+
+    @Test
+    void listInterrupted_keysetPagination_walksAllRows() {
+        for (int i = 1; i <= 5; i++) {
+            repo.save("exec-" + i, new ExecutionSnapshot.Builder()
+                    .executionId("exec-" + i).machineDefinitionId("order")
+                    .currentStateName("PROCESSING")
+                    .status(SnapshotStatus.RUNNING).capturedAt(Instant.now()).build());
+        }
+        repo.save("waiting-1", new ExecutionSnapshot.Builder()
+                .executionId("waiting-1").machineDefinitionId("order")
+                .currentStateName("PROCESSING")
+                .status(SnapshotStatus.WAITING).capturedAt(Instant.now()).build());
+
+        // Page through with page size 2
+        List<String> seen = new java.util.ArrayList<>();
+        String lastId = null;
+        while (true) {
+            List<ExecutionSnapshot> page = repo.listInterrupted(2, lastId);
+            if (page.isEmpty()) break;
+            page.forEach(s -> seen.add(s.getExecutionId()));
+            if (page.size() < 2) break;
+            lastId = page.get(page.size() - 1).getExecutionId();
+        }
+        assertThat(seen).hasSize(5);
+        assertThat(seen).doesNotContain("waiting-1");
     }
 
 }
