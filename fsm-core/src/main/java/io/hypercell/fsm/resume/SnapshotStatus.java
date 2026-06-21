@@ -7,26 +7,6 @@ package io.hypercell.fsm.resume;
  * because the snapshot lives in storage between request boundaries. The persisted
  * status encodes exactly where in its lifecycle an execution is at rest.
  * <p>
- * Status transition diagram:
- * <pre>
- *   (new execution)
- *        │ initial state entered / sub-steps run
- *        ▼
- *     RUNNING ──── sub-steps done, non-terminal ──────────────────────► WAITING
- *        │                                                                  │
- *        │ sub-step fails                                          next event arrives
- *        ▼                                                                  │
- *      FAILED ◄──────────────── retry also fails ──────────────── RUNNING (retry)
- *        │                                                                  │
- *        │ RetryPolicy.shouldRetry() == true                        retry succeeds
- *        ▼                                                                  │
- *  RETRY_SCHEDULED ─── scheduled retry fires ──────────────────────────────┤
- *                                                                           │
- *                                              terminal state reached       │
- *                                                      ▼                   │
- *                                                  TERMINATED ◄────────────┘
- * </pre>
- * <p>
  * Precise meanings:
  * <ul>
  *   <li>{@code RUNNING} — the execution is actively processing sub-steps. A crash
