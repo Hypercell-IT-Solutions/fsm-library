@@ -103,8 +103,8 @@ public interface StateMachineManager<C> {
      * @param executionId your business entity ID (orderId, transactionId, etc.)
      * @param event       the event name from the incoming request
      * @throws io.hypercell.fsm.exception.IllegalTriggerStateException if the execution is
-     *         FAILED, RUNNING, or RETRY_SCHEDULED
-     * @throws io.hypercell.fsm.exception.CompletedMachineException if the execution is TERMINATED
+     *                                                                 FAILED, RUNNING, or RETRY_SCHEDULED
+     * @throws io.hypercell.fsm.exception.CompletedMachineException    if the execution is TERMINATED
      */
     ManagedTransitionResult<C> trigger(String executionId, String event);
 
@@ -117,8 +117,8 @@ public interface StateMachineManager<C> {
      *
      * @param contextOverride the ctx to use; null falls back to the contextLoader
      * @throws io.hypercell.fsm.exception.IllegalTriggerStateException if the execution is
-     *         FAILED, RUNNING, or RETRY_SCHEDULED
-     * @throws io.hypercell.fsm.exception.CompletedMachineException if the execution is TERMINATED
+     *                                                                 FAILED, RUNNING, or RETRY_SCHEDULED
+     * @throws io.hypercell.fsm.exception.CompletedMachineException    if the execution is TERMINATED
      */
     ManagedTransitionResult<C> trigger(String executionId, String event, C contextOverride);
 
@@ -294,6 +294,57 @@ public interface StateMachineManager<C> {
      * @throws IllegalStateException if no {@code recoveryExecutor} is configured
      */
     int recoverInterruptedExecutions();
+
+    /**
+     * Retry all {@code FAILED} executions whose {@code attempt_number} is below
+     * {@code maxAttempts}, in parallel via the consumer-supplied {@code recoveryExecutor}.
+     *
+     * <p>This is the consumer-driven, distributed alternative to the in-process
+     * coordinator ({@link #recoverPendingRetries()}). It does <em>not</em> require a
+     * {@link io.hypercell.fsm.retry.RetryCoordinator} — instead the consumer decides when
+     * and how often to run sweeps (e.g. from a scheduled task or a leader-elected cron job).
+     *
+     * <p><strong>Scope: {@code FAILED} only.</strong> {@code RETRY_SCHEDULED} rows are
+     * managed by the in-process coordinator and are not touched by this sweep. Do
+     * <em>not</em> run this sweep and an auto-retry coordinator on the same definition
+     * simultaneously — with a coordinator, {@code FAILED} means "policy exhausted", and
+     * this sweep would override that decision.
+     *
+     * <p><strong>Bounded by {@code maxAttempts}.</strong> Only executions with
+     * {@code attempt_number < maxAttempts} are fetched. This cap is applied in the query
+     * predicate ({@link io.hypercell.fsm.resume.SnapshotRepository#listFailed}), so
+     * exhausted rows are never loaded. {@code maxAttempts} must be {@code > 0}; passing
+     * {@code 0} or a negative value throws {@link IllegalArgumentException}.
+     *
+     * <p><strong>Attempt-number semantics.</strong> Each call to this method that retries
+     * an execution increments its {@code attempt_number} by exactly 1 before invoking
+     * {@code proceed()}. Generic {@link #proceed(String)} and the coordinator path do
+     * <em>not</em> increment the counter — {@code attempt_number} therefore reads as
+     * "number of sweep retry attempts made by {@code recoverFailedExecutions}".
+     *
+     * <p><strong>Requires a {@code recoveryExecutor}.</strong> Throws
+     * {@link IllegalStateException} if none is configured on the definition builder. Use
+     * {@link #proceed(String)} per execution as the alternative.
+     *
+     * <p><strong>Async — returns submitted count.</strong> Tasks are submitted to the
+     * executor immediately; the method returns the count of tasks submitted (executions may
+     * still be in-flight on return).
+     *
+     * <p><strong>Best-effort, per-execution isolation.</strong> One failing task does not
+     * stop others from running. Errors are logged per execution.
+     *
+     * <p><strong>Single-instance or leader-election for distributed deployments.</strong>
+     * Do not call this from every replica — multiple concurrent sweeps will race to retry
+     * the same executions. Use a leader-election mechanism or a single designated scheduler
+     * node to ensure only one sweep runs at a time.
+     *
+     * @param maxAttempts upper bound on {@code attempt_number} (exclusive); must be {@code > 0}
+     * @return the number of retry tasks submitted to the executor (async — may still be
+     * in-flight when this method returns)
+     * @throws IllegalStateException    if no {@code recoveryExecutor} is configured
+     * @throws IllegalArgumentException if {@code maxAttempts <= 0}
+     */
+    int recoverFailedExecutions(int maxAttempts);
 
     /**
      * Create a new manager with a different context loader.

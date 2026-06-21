@@ -237,4 +237,108 @@ class JdbcSnapshotRepositoryTest {
         assertThat(seen).doesNotContain("waiting-1");
     }
 
+    // ------------------------------------------------------------------ listFailed tests
+
+    private ExecutionSnapshot failedSnapshotWithAttempt(String executionId, int attemptNumber) {
+        return new ExecutionSnapshot.Builder()
+                .executionId(executionId)
+                .machineDefinitionId("order")
+                .currentStateName("PROCESSING")
+                .failedStateName("PROCESSING")
+                .failedSubStepName("charge")
+                .lastTriggerEvent("APPROVE")
+                .attemptNumber(attemptNumber)
+                .lastFailedAt(Instant.now())
+                .lastErrorMessage("timeout")
+                .status(SnapshotStatus.FAILED)
+                .capturedAt(Instant.now())
+                .build();
+    }
+
+    @Test
+    void listFailed_returnsOnlyFailedRowsBelowMaxAttempts() {
+        // eligible: FAILED with attempt_number < 3
+        repo.save("failed-1", failedSnapshotWithAttempt("failed-1", 1));
+        repo.save("failed-2", failedSnapshotWithAttempt("failed-2", 2));
+        // not eligible: attempt_number == maxAttempts (3)
+        repo.save("failed-at-cap", failedSnapshotWithAttempt("failed-at-cap", 3));
+        // not eligible: attempt_number > maxAttempts
+        repo.save("failed-over-cap", failedSnapshotWithAttempt("failed-over-cap", 5));
+        // not eligible: wrong status
+        repo.save("running-1", new ExecutionSnapshot.Builder()
+                .executionId("running-1").machineDefinitionId("order")
+                .currentStateName("PROCESSING")
+                .status(SnapshotStatus.RUNNING).capturedAt(Instant.now()).build());
+        repo.save("waiting-1", new ExecutionSnapshot.Builder()
+                .executionId("waiting-1").machineDefinitionId("order")
+                .currentStateName("PROCESSING")
+                .status(SnapshotStatus.WAITING).capturedAt(Instant.now()).build());
+        repo.save("terminated-1", new ExecutionSnapshot.Builder()
+                .executionId("terminated-1").machineDefinitionId("order")
+                .currentStateName("SHIPPED")
+                .status(SnapshotStatus.TERMINATED).capturedAt(Instant.now()).build());
+
+        List<ExecutionSnapshot> result = repo.listFailed(10, null, 3);
+
+        assertThat(result).hasSize(2);
+        assertThat(result).extracting(ExecutionSnapshot::getExecutionId)
+                .containsExactlyInAnyOrder("failed-1", "failed-2");
+        assertThat(result).allMatch(ExecutionSnapshot::isFailed);
+        assertThat(result).allMatch(s -> s.getAttemptNumber() < 3);
+    }
+
+    @Test
+    void listFailed_emptyWhenNoEligibleRows() {
+        // All at or above cap
+        repo.save("failed-capped", failedSnapshotWithAttempt("failed-capped", 3));
+        repo.save("running-1", new ExecutionSnapshot.Builder()
+                .executionId("running-1").machineDefinitionId("order")
+                .currentStateName("PROCESSING")
+                .status(SnapshotStatus.RUNNING).capturedAt(Instant.now()).build());
+
+        List<ExecutionSnapshot> result = repo.listFailed(10, null, 3);
+
+        assertThat(result).isEmpty();
+    }
+
+    @Test
+    void listFailed_keysetPagination_walksAllEligibleRows() {
+        // Seed 5 eligible FAILED rows with attempt_number=1
+        for (int i = 1; i <= 5; i++) {
+            repo.save("failed-" + i, failedSnapshotWithAttempt("failed-" + i, 1));
+        }
+        // Seed 1 ineligible row (at cap)
+        repo.save("failed-at-cap", failedSnapshotWithAttempt("failed-at-cap", 3));
+        // Seed 1 non-FAILED row
+        repo.save("waiting-1", new ExecutionSnapshot.Builder()
+                .executionId("waiting-1").machineDefinitionId("order")
+                .currentStateName("PROCESSING")
+                .status(SnapshotStatus.WAITING).capturedAt(Instant.now()).build());
+
+        // Page through with page size 2
+        List<String> seen = new java.util.ArrayList<>();
+        String lastId = null;
+        while (true) {
+            List<ExecutionSnapshot> page = repo.listFailed(2, lastId, 3);
+            if (page.isEmpty()) break;
+            page.forEach(s -> seen.add(s.getExecutionId()));
+            if (page.size() < 2) break;
+            lastId = page.get(page.size() - 1).getExecutionId();
+        }
+        assertThat(seen).hasSize(5);
+        assertThat(seen).doesNotContain("failed-at-cap", "waiting-1");
+    }
+
+    @Test
+    void listFailed_orderedByExecutionId() {
+        repo.save("failed-c", failedSnapshotWithAttempt("failed-c", 1));
+        repo.save("failed-a", failedSnapshotWithAttempt("failed-a", 1));
+        repo.save("failed-b", failedSnapshotWithAttempt("failed-b", 1));
+
+        List<ExecutionSnapshot> result = repo.listFailed(10, null, 5);
+
+        assertThat(result).extracting(ExecutionSnapshot::getExecutionId)
+                .containsExactly("failed-a", "failed-b", "failed-c");
+    }
+
 }

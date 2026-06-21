@@ -80,4 +80,30 @@ public interface SnapshotRepository {
      * never {@code null}
      */
     List<ExecutionSnapshot> listInterrupted(int limit, String afterExecutionId);
+
+    /**
+     * Return a page of failed executions eligible for a consumer-driven retry sweep.
+     * <p>
+     * Returns snapshots with status {@code FAILED} and {@code attempt_number < maxAttempts},
+     * ordered by {@code executionId} ascending and keyset-paginated. Pass the last seen
+     * {@code executionId} as {@code afterExecutionId} (or {@code null} for the first page).
+     * The caller keeps paginating until the returned list is smaller than {@code limit}.
+     * <p>
+     * The {@code maxAttempts} cap is part of the query predicate — rows at or above the cap
+     * are never returned, so exhausted executions are naturally excluded without a separate
+     * filter step in the caller.
+     * <p>
+     * Used by
+     * {@link io.hypercell.fsm.manager.StateMachineManager#recoverFailedExecutions(int)}.
+     * An implementation that does not support this sweep may simply return an empty list.
+     *
+     * @param limit            maximum number of rows to return per page (must be &gt; 0)
+     * @param afterExecutionId exclusive lower bound for keyset pagination; {@code null}
+     *                         means start from the beginning
+     * @param maxAttempts      upper bound on {@code attempt_number} (exclusive); only rows
+     *                         with {@code attempt_number < maxAttempts} are returned
+     * @return at most {@code limit} {@code FAILED} snapshots with {@code attempt_number < maxAttempts}
+     * ordered by execution ID; never {@code null}
+     */
+    List<ExecutionSnapshot> listFailed(int limit, String afterExecutionId, int maxAttempts);
 }

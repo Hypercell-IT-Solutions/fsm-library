@@ -751,6 +751,11 @@ class CrashRecoveryTest {
             public java.util.List<ExecutionSnapshot> listInterrupted(int limit, String afterExecutionId) {
                 return base.listInterrupted(limit, afterExecutionId);
             }
+
+            @Override
+            public java.util.List<ExecutionSnapshot> listFailed(int limit, String afterExecutionId, int maxAttempts) {
+                return base.listFailed(limit, afterExecutionId, maxAttempts);
+            }
         };
 
         // B→C definition: B has its own sub-step (bStep), C has c1 and c2.
@@ -889,6 +894,11 @@ class CrashRecoveryTest {
             @Override
             public java.util.List<ExecutionSnapshot> listInterrupted(int limit, String afterExecutionId) {
                 return base.listInterrupted(limit, afterExecutionId);
+            }
+
+            @Override
+            public java.util.List<ExecutionSnapshot> listFailed(int limit, String afterExecutionId, int maxAttempts) {
+                return base.listFailed(limit, afterExecutionId, maxAttempts);
             }
         };
 

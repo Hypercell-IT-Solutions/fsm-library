@@ -114,6 +114,20 @@ public class FileSnapshotRepository implements SnapshotRepository {
                 .toList();
     }
 
+    @Override
+    public List<ExecutionSnapshot> listFailed(int limit, String afterExecutionId, int maxAttempts) {
+        return listExecutionIds().stream()
+                .map(this::load)
+                .filter(Optional::isPresent)
+                .map(Optional::get)
+                .filter(s -> s.isFailed() && s.getAttemptNumber() < maxAttempts)
+                .sorted(java.util.Comparator.comparing(ExecutionSnapshot::getExecutionId))
+                .filter(s -> afterExecutionId == null
+                        || s.getExecutionId().compareTo(afterExecutionId) > 0)
+                .limit(limit)
+                .toList();
+    }
+
     /**
      * Serialize an ExecutionSnapshot to a flat Properties map.
      * <p>

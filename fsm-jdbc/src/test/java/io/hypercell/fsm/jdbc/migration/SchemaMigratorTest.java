@@ -48,8 +48,31 @@ class SchemaMigratorTest {
 
         migrator.migrate();
 
-        assertThat(historyVersions(ds)).containsExactly(1);
+        assertThat(historyVersions(ds)).containsExactly(1, 2);
         assertThat(tableExists(ds, "fsm_snapshots")).isTrue();
+    }
+
+    @Test
+    void freshDb_v1AndV2_bothInHistory_andIndexExists() throws Exception {
+        DataSource ds = newDs();
+        migrator(ds).migrate();
+
+        // Both V1 and V2 must appear in history
+        assertThat(historyVersions(ds)).containsExactly(1, 2);
+
+        // The composite index introduced by V2 must exist
+        boolean indexFound = false;
+        try (Connection conn = ds.getConnection();
+             ResultSet rs = conn.getMetaData().getIndexInfo(null, null, "FSM_SNAPSHOTS", false, false)) {
+            while (rs.next()) {
+                String indexName = rs.getString("INDEX_NAME");
+                if ("IDX_FSM_SNAPSHOTS_STATUS_ATTEMPT".equalsIgnoreCase(indexName)) {
+                    indexFound = true;
+                    break;
+                }
+            }
+        }
+        assertThat(indexFound).as("V2 index idx_fsm_snapshots_status_attempt must exist").isTrue();
     }
 
     @Test
@@ -60,7 +83,7 @@ class SchemaMigratorTest {
         migrator.migrate();
         migrator.migrate();
 
-        assertThat(historyVersions(ds)).containsExactly(1);
+        assertThat(historyVersions(ds)).containsExactly(1, 2);
     }
 
     @Test

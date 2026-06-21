@@ -487,6 +487,48 @@ void recoverOnStartup() {
 
 > **WARNING — single-instance only.** Do **not** call `recoverInterruptedExecutions()` in a multi-replica (clustered) deployment. A starting node could resume an execution that is actively being processed by a live peer, causing duplicate sub-step execution. Multi-replica deployments should rely on **lazy resume** instead: `trigger()` and `resume(executionId)` detect and complete an interrupted execution on the next incoming request, which is inherently safe because the client is re-driving a specific execution it owns.
 
+---
+
+### Consumer-driven sweep for FAILED executions: `recoverFailedExecutions(maxAttempts)`
+
+`recoverFailedExecutions(int maxAttempts)` is the distributed-safe alternative to the in-process coordinator path (`recoverPendingRetries`). It does **not** require a `RetryCoordinator` — the consumer owns the distribution strategy (leader election, cron, scheduled task).
+
+```java
+// Configure a recovery executor on the definition
+StateMachineDefinition<OrderContext> definition = StateMachine.<OrderContext>define("order")
+    // ... states, transitions, etc.
+    .recoveryExecutor(Executors.newFixedThreadPool(4))  // consumer owns lifecycle
+    .build();
+
+// Driven by the consumer (e.g. from a leader-elected cron job or @Scheduled)
+int submitted = manager.recoverFailedExecutions(5); // retry FAILED rows with attempt_number < 5
+log.info("Submitted {} failed executions for retry", submitted);
+```
+
+**Scope: `FAILED` only.** `RETRY_SCHEDULED` rows belong to the in-process coordinator and are left untouched. Do **not** run `recoverFailedExecutions` and an auto-retry coordinator on the same definition simultaneously — with a coordinator, `FAILED` means "policy exhausted", and the sweep would override that decision.
+
+**Bounded by `maxAttempts`.** Only executions with `attempt_number < maxAttempts` are fetched. Rows at or above the cap are never loaded; exhausted rows stop being retried naturally.
+
+**Attempt-number semantics.** Each call to `recoverFailedExecutions` that retries an execution increments its `attempt_number` by exactly 1 before invoking `proceed()`. Generic `proceed()` and the coordinator path do **not** increment this counter — `attempt_number` therefore reads as "number of sweep retry attempts made by `recoverFailedExecutions`".
+
+**Requires a `recoveryExecutor`.** Throws `IllegalStateException` if none is configured on the definition builder. `maxAttempts` must be `> 0`; passing `0` or a negative value throws `IllegalArgumentException`.
+
+**Async — returns submitted count.** Tasks are submitted to the executor immediately; the method returns the count submitted (executions may still be in-flight on return).
+
+**Single-instance or leader-election for distributed deployments.** Do not call this from every replica — multiple concurrent sweeps would race to retry the same executions.
+
+**Contrast with `recoverPendingRetries`:**
+
+| | `recoverPendingRetries()` | `recoverFailedExecutions(maxAttempts)` |
+|---|---|---|
+| Scope | `FAILED` + `RETRY_SCHEDULED` | `FAILED` only |
+| Requires | `RetryCoordinator` on definition | `recoveryExecutor` on definition |
+| Threading | Internal single-thread daemon | Consumer-supplied executor |
+| Distribution | In-process only | Consumer-driven (leader election recommended) |
+| Attempt counter | Managed by coordinator | Incremented by sweep (`attempt_number < maxAttempts`) |
+
+The V2 schema migration (see [JDBC & Spring Boot](08-jdbc-and-spring-boot.md#schema-migrations)) adds a composite index on `(status, attempt_number)` to accelerate the sweep query `WHERE status = 'FAILED' AND attempt_number < ?`.
+
 ### Cost
 
 Per-sub-step checkpointing adds one repository write per executed sub-step (vs. one per transition previously). This is required for the idempotency guarantee. In a future release this may be made opt-out per sub-step if write volume is a concern.
