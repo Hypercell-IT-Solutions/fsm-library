@@ -6,6 +6,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.hypercell.fsm.core.ActionResult;
 import io.hypercell.fsm.exception.SnapshotException;
+import io.hypercell.fsm.jdbc.migration.MigrationMode;
+import io.hypercell.fsm.jdbc.migration.SchemaMigrator;
 import io.hypercell.fsm.resume.ExecutionSnapshot;
 import io.hypercell.fsm.resume.SnapshotRepository;
 import io.hypercell.fsm.resume.SnapshotStatus;
@@ -13,53 +15,49 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import javax.sql.DataSource;
-import java.sql.*;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
 
 /**
  * A {@link SnapshotRepository} backed by any SQL database via plain JDBC.
- * <p>
- * AUTOMATIC SCHEMA CREATION: The {@code fsm_snapshots} table and index are created
- * automatically on the first instantiation of this repository (if the table does not
- * already exist). No manual DDL step is required — just provide a {@code DataSource}
- * and a {@link SqlDialect} for your database.
- * <p>
- * The dialect's {@link SqlDialect#ddlStatements(String)} method provides the
- * create-table and create-index statements. Built-in dialects use standard SQL
- * types compatible with PostgreSQL, MySQL, MariaDB, H2, and SQLite. For Oracle,
- * use {@link io.hypercell.fsm.jdbc.dialect.OracleDialect}, which
- * automatically creates with Oracle-native types ({@code VARCHAR2}, {@code CLOB},
- * {@code NUMBER}).
- * <p>
- * A custom table name can be supplied via the three-argument constructor.
- * <p>
- * USAGE:
+ *
+ * <h2>Automatic schema management</h2>
+ * <p>By default this repository runs {@link SchemaMigrator} in {@link MigrationMode#UPDATE}
+ * mode at construction time, creating or upgrading the schema automatically. No manual DDL
+ * step is required — just provide a {@link DataSource} and a {@link SqlDialect} for your
+ * database.
+ *
+ * <p>To opt out of automatic DDL, supply a pre-configured {@link SchemaMigrator}:
+ * <ul>
+ *   <li>{@link MigrationMode#VALIDATE} — fails fast if the DB is behind the bundled registry
+ *       and logs the pending SQL for operators to apply out-of-band.</li>
+ *   <li>{@link MigrationMode#OFF} — schema management is disabled entirely; the caller is
+ *       responsible for the schema.</li>
+ * </ul>
+ *
+ * <h2>Usage</h2>
  * <pre>{@code
  * DataSource dataSource = ...; // your connection pool (HikariCP, etc.)
- * // Table is created on first instantiation:
+ * // Table is created/migrated automatically on first instantiation:
  * SnapshotRepository repo = new JdbcSnapshotRepository(dataSource, new PostgreSqlDialect());
- *
- * StateMachineDefinition<OrderContext> definition = StateMachine.<OrderContext>define("order-workflow")
- *     .snapshotRepository(repo)
- *     ...
- *     .build();
  * }</pre>
- * <p>
- * THREAD SAFETY: thread-safe. Each operation acquires and releases a connection from
- * the pool independently.
- * <p>
- * OPTIMISTIC LOCKING: the {@code version} column is incremented on every save.
- * The upsert is atomic at the database level, preventing lost updates within a
- * single database instance. For cross-replica distributed locking, add a
- * compare-and-swap check in a custom {@link SqlDialect} that includes
- * {@code WHERE version = :expected} and fails if 0 rows are affected.
- * <p>
- * SERIALIZATION: {@code completedSubStepResults} is stored as JSON in the
- * {@code completed_steps} column in a direct key-value format:
- * {@code {subStepName: {status, error?, output}, ...}}. This enables database-native
- * querying. All timestamp fields are stored as ISO-8601 strings to avoid timezone
- * issues across different JDBC drivers.
+ *
+ * <h2>Thread safety</h2>
+ * <p>Thread-safe. Each operation acquires and releases a connection from the pool independently.
+ *
+ * <h2>Optimistic locking</h2>
+ * <p>The {@code version} column is incremented on every save. The upsert is atomic at the
+ * database level, preventing lost updates within a single database instance.
+ *
+ * <h2>Serialization</h2>
+ * <p>{@code completedSubStepResults} is stored as JSON in the {@code completed_steps} column
+ * in a direct key-value format: {@code {subStepName: {status, error?, output}, ...}}.
+ * All timestamp fields are stored as ISO-8601 strings to avoid timezone issues.
  */
 public class JdbcSnapshotRepository implements SnapshotRepository {
 
@@ -67,7 +65,7 @@ public class JdbcSnapshotRepository implements SnapshotRepository {
     private static final ObjectMapper objectMapper = new ObjectMapper();
 
     /**
-     * Default table name used when no explicit name is provided.
+     * The snapshot table name used by this repository.
      */
     public static final String DEFAULT_TABLE = "fsm_snapshots";
 
@@ -78,8 +76,6 @@ public class JdbcSnapshotRepository implements SnapshotRepository {
             """;
 
     private final DataSource dataSource;
-    private final SqlDialect dialect;
-    private final String tableName;
 
     private final String selectSql;
     private final String deleteSql;
@@ -87,63 +83,37 @@ public class JdbcSnapshotRepository implements SnapshotRepository {
     private final String upsertSql;
 
     /**
-     * Create a repository using the default table name {@value #DEFAULT_TABLE}.
+     * Create a repository targeting the {@value #DEFAULT_TABLE} table.
+     * The schema is created/migrated automatically in {@link MigrationMode#UPDATE} mode.
      *
      * @param dataSource the connection pool; must be pre-configured and ready
      * @param dialect    the database-specific upsert strategy
      */
     public JdbcSnapshotRepository(DataSource dataSource, SqlDialect dialect) {
-        this(dataSource, dialect, DEFAULT_TABLE);
+        this(dataSource, dialect, new SchemaMigrator(dataSource, dialect,
+                MigrationMode.UPDATE, false, Duration.ofMinutes(5), Duration.ofSeconds(30)));
     }
 
     /**
-     * Create a repository with a custom table name.
+     * Create a repository with a fully configured {@link SchemaMigrator}.
+     * Use this constructor when you want to control the migration mode (VALIDATE, OFF, or UPDATE
+     * with custom TTL / strict-checksum settings).
      *
-     * @param dataSource the connection pool
-     * @param dialect    the database-specific upsert strategy
-     * @param tableName  the table name to use instead of {@value #DEFAULT_TABLE}
+     * @param dataSource     the connection pool
+     * @param dialect        the database-specific upsert strategy
+     * @param schemaMigrator the pre-configured migrator; {@link SchemaMigrator#migrate()} is
+     *                       called during construction
      */
-    public JdbcSnapshotRepository(DataSource dataSource, SqlDialect dialect, String tableName) {
+    public JdbcSnapshotRepository(DataSource dataSource,
+                                  SqlDialect dialect,
+                                  SchemaMigrator schemaMigrator) {
         this.dataSource = dataSource;
-        this.dialect = dialect;
-        this.tableName = tableName;
-        this.selectSql = "SELECT " + SELECT_COLUMNS + " FROM " + tableName + " WHERE execution_id = ?";
-        this.deleteSql = "DELETE FROM " + tableName + " WHERE execution_id = ?";
-        this.listPendingSql = "SELECT " + SELECT_COLUMNS + " FROM " + tableName
+        this.selectSql = "SELECT " + SELECT_COLUMNS + " FROM " + DEFAULT_TABLE + " WHERE execution_id = ?";
+        this.deleteSql = "DELETE FROM " + DEFAULT_TABLE + " WHERE execution_id = ?";
+        this.listPendingSql = "SELECT " + SELECT_COLUMNS + " FROM " + DEFAULT_TABLE
                 + " WHERE status IN ('FAILED', 'RETRY_SCHEDULED')";
-        this.upsertSql = dialect.upsertSql(tableName);
-        initSchema();
-    }
-
-    private void initSchema() {
-        try (Connection conn = dataSource.getConnection()) {
-            if (tableExists(conn)) {
-                log.debug("[JdbcSnapshotRepository] Table '{}' already exists", tableName);
-                return;
-            }
-        } catch (SQLException e) {
-            log.warn("[JdbcSnapshotRepository] Could not check for table existence: {}. Attempting to create anyway.",
-                    e.getMessage());
-        }
-
-        for (String ddl : dialect.ddlStatements(tableName)) {
-            try (Connection conn = dataSource.getConnection();
-                 Statement stmt = conn.createStatement()) {
-                stmt.execute(ddl);
-                log.debug("[JdbcSnapshotRepository] Executed: {}", ddl.substring(0, Math.min(60, ddl.length())) + "...");
-            } catch (SQLException e) {
-                log.debug("[JdbcSnapshotRepository] DDL statement failed (likely already exists): {}", e.getMessage());
-            }
-        }
-    }
-
-    private boolean tableExists(Connection conn) throws SQLException {
-        try (PreparedStatement ps = conn.prepareStatement(selectSql + " LIMIT 0")) {
-            ps.executeQuery();
-            return true;
-        } catch (SQLException e) {
-            return false;
-        }
+        this.upsertSql = dialect.upsertSql(DEFAULT_TABLE);
+        schemaMigrator.migrate();
     }
 
     @Override

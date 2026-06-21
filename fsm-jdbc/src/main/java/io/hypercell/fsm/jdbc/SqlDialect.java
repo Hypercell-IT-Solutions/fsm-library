@@ -1,14 +1,14 @@
 package io.hypercell.fsm.jdbc;
 
-import java.util.List;
-
 /**
  * Database-specific SQL for {@link JdbcSnapshotRepository}.
- * <p>
- * Only the upsert statement and DDL type names vary between databases; every other
- * operation (SELECT, DELETE, listPendingRetries) uses standard SQL shared across all dialects.
- * <p>
- * Built-in implementations:
+ *
+ * <p>Only the upsert statement varies between databases; every other operation
+ * (SELECT, DELETE, listPendingRetries) uses standard SQL shared across all dialects.
+ * Schema creation is handled by the file-based {@link io.hypercell.fsm.jdbc.migration.SchemaMigrator},
+ * which resolves per-dialect SQL files using the {@link #id()} returned by this interface.
+ *
+ * <p>Built-in implementations:
  * <ul>
  *   <li>{@link io.hypercell.fsm.jdbc.dialect.PostgreSqlDialect}</li>
  *   <li>{@link io.hypercell.fsm.jdbc.dialect.MySqlDialect}</li>
@@ -21,9 +21,23 @@ import java.util.List;
 public interface SqlDialect {
 
     /**
+     * Return a stable, lowercase identifier for this dialect.
+     *
+     * <p>This value is used by {@link io.hypercell.fsm.jdbc.migration.SchemaMigrator} to
+     * resolve the correct migration resource folder:
+     * {@code io/hypercell/fsm/db/migrations/<id>/}.
+     *
+     * <p>Built-in values: {@code "postgresql"}, {@code "mysql"}, {@code "h2"},
+     * {@code "sqlite"}, {@code "oracle"}.
+     *
+     * @return the dialect identifier, e.g. {@code "postgresql"}
+     */
+    String id();
+
+    /**
      * Return the upsert SQL for the given table name.
-     * <p>
-     * The statement must accept exactly 13 positional parameters in this order:
+     *
+     * <p>The statement must accept exactly 13 positional parameters in this order:
      * <ol>
      *   <li>execution_id</li>
      *   <li>machine_definition_id</li>
@@ -46,39 +60,4 @@ public interface SqlDialect {
      * @return the fully formed upsert SQL string
      */
     String upsertSql(String tableName);
-
-    /**
-     * Return the DDL statements needed to create the snapshot table and its index.
-     * <p>
-     * Called once by {@link JdbcSnapshotRepository} at construction time if the table
-     * does not yet exist. The default implementation uses standard SQL types compatible
-     * with PostgreSQL, MySQL, MariaDB, H2, and SQLite. Override this method for
-     * databases that require different type names (e.g. Oracle — see
-     * {@link io.hypercell.fsm.jdbc.dialect.OracleDialect}).
-     *
-     * @param tableName the table name to create
-     * @return ordered list of DDL statements to execute; each is executed separately
-     */
-    default List<String> ddlStatements(String tableName) {
-        return List.of(
-                "CREATE TABLE " + tableName + " ("
-                        + "    execution_id          VARCHAR(255) NOT NULL,"
-                        + "    machine_definition_id VARCHAR(255) NOT NULL,"
-                        + "    current_state_name    VARCHAR(255),"
-                        + "    failed_state_name     VARCHAR(255),"
-                        + "    failed_sub_step_name  VARCHAR(255),"
-                        + "    last_trigger_event    VARCHAR(255),"
-                        + "    attempt_number        INT          NOT NULL DEFAULT 1,"
-                        + "    last_failed_at        VARCHAR(50),"
-                        + "    scheduled_retry_at    VARCHAR(50),"
-                        + "    captured_at           VARCHAR(50)  NOT NULL,"
-                        + "    last_error_message    TEXT,"
-                        + "    status                VARCHAR(50)  NOT NULL,"
-                        + "    completed_steps       TEXT,"
-                        + "    version               BIGINT       NOT NULL DEFAULT 1,"
-                        + "    CONSTRAINT pk_" + tableName + " PRIMARY KEY (execution_id)"
-                        + ")",
-                "CREATE INDEX idx_" + tableName + "_status ON " + tableName + " (status)"
-        );
-    }
 }

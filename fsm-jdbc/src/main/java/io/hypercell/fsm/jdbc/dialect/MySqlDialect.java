@@ -9,6 +9,11 @@ import io.hypercell.fsm.jdbc.SqlDialect;
 public class MySqlDialect implements SqlDialect {
 
     @Override
+    public String id() {
+        return "mysql";
+    }
+
+    @Override
     public String upsertSql(String tableName) {
         return String.format("""
                 INSERT INTO %s (

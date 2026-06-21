@@ -604,11 +604,30 @@ public class JdbcSnapshotRepository implements SnapshotRepository {
 ```
 
 **Features:**
-- Automatic schema creation on first use (if table doesn't exist)
+- Versioned schema migration runner (`SchemaMigrator`) creates and upgrades the `fsm_snapshots` table automatically on startup (UPDATE mode by default); configurable via `fsm.jdbc.migration.*` properties — see [JDBC & Spring Boot — Schema migrations](08-jdbc-and-spring-boot.md#schema-migrations)
 - Optimistic locking via `version` column prevents conflicting concurrent updates
 - Sub-step results stored as JSON for cross-database portability
 - Supports PostgreSQL, MySQL, MariaDB, H2, SQLite, Oracle
 - Integration with Spring Boot: see [`fsm-spring-boot-starter-jdbc`](08-jdbc-and-spring-boot.md)
+
+**`SqlDialect` SPI (custom dialect implementations):**
+
+```java
+public interface SqlDialect {
+    String id();                        // stable lowercase identifier, e.g. "postgresql"
+    String upsertSql(String tableName); // dialect-specific upsert statement
+}
+```
+
+`id()` is **new in 1.0.0-RC2** — it returns the dialect's folder name used by `SchemaMigrator` to resolve per-dialect SQL files from the classpath. The old `ddlStatements(String)` method has been **removed**.
+
+If you implement a custom dialect, you must:
+1. Implement `String id()` and return a stable, lowercase identifier (e.g. `"mydb"`).
+2. Bundle migration SQL files under `io/hypercell/fsm/db/migrations/<id>/` on the classpath for every registered migration version. Currently that means two files:
+   - `bootstrap.sql` — creates `fsm_schema_history` and `fsm_schema_lock`, seeds the lock row
+   - `V1__create_snapshots.sql` — creates the `fsm_snapshots` table and its status index
+
+The library bundles these files for the five built-in dialects (`postgresql`, `mysql`, `h2`, `sqlite`, `oracle`) only.
 
 **Basic setup:**
 

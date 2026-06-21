@@ -1,20 +1,28 @@
 package io.hypercell.fsm.spring;
 
+import io.hypercell.fsm.jdbc.migration.MigrationMode;
 import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.boot.context.properties.NestedConfigurationProperty;
+
+import java.time.Duration;
 
 /**
  * Configuration properties for FSM JDBC repository autoconfiguration.
- * <p>
- * EXAMPLE application.yml:
+ *
+ * <p>EXAMPLE application.yml:
  * <pre>{@code
  * fsm:
  *   jdbc:
- *     enabled: true              # enable/disable autoconfiguration
- *     dialect: postgresql         # postgresql, mysql, h2, sqlite, oracle
- *     table-name: fsm_snapshots   # custom table name (optional)
+ *     enabled: true                    # enable/disable autoconfiguration
+ *     dialect: postgresql              # postgresql, mysql, h2, sqlite, oracle
+ *     migration:
+ *       mode: UPDATE                   # UPDATE (default), VALIDATE, or OFF
+ *       strict-checksum: true          # fail on checksum mismatch (false: warn only)
+ *       lock-ttl: 5m                   # stale-lock TTL (default: 5 minutes)
+ *       lock-wait-timeout: 30s         # how long to wait for the migration lock (default: 30s)
  * }</pre>
- * <p>
- * OPTIONALITY: This starter is OPTIONAL. You can use FSM without it:
+ *
+ * <p>OPTIONALITY: This starter is OPTIONAL. You can use FSM without it:
  * <ul>
  *   <li>Use {@code StateMachine.inMemoryRepository()} directly — no beans needed</li>
  *   <li>Use {@code StateMachine.fileRepository(Path)} directly — no beans needed</li>
@@ -31,14 +39,15 @@ public class FsmJdbcProperties {
     private boolean enabled = true;
 
     /**
-     * SQL dialect: PostgreSQL, mysql, h2, sqlite, or oracle. Defaults to PostgreSQL.
+     * SQL dialect: postgresql (default), mysql, h2, sqlite, or oracle.
      */
-    private String dialect = "PostgreSQL";
+    private String dialect = "postgresql";
 
     /**
-     * Custom table name for snapshots. Defaults to fsm_snapshots.
+     * Schema migration settings.
      */
-    private String tableName = "fsm_snapshots";
+    @NestedConfigurationProperty
+    private Migration migration = new Migration();
 
     public boolean isEnabled() {
         return enabled;
@@ -56,11 +65,78 @@ public class FsmJdbcProperties {
         this.dialect = dialect;
     }
 
-    public String getTableName() {
-        return tableName;
+    public Migration getMigration() {
+        return migration;
     }
 
-    public void setTableName(String tableName) {
-        this.tableName = tableName;
+    public void setMigration(Migration migration) {
+        this.migration = migration;
+    }
+
+    /**
+     * Nested properties controlling the schema migration runner behaviour.
+     */
+    public static class Migration {
+
+        /**
+         * Migration mode: UPDATE (default), VALIDATE, or OFF.
+         * <ul>
+         *   <li>UPDATE — apply pending migrations automatically at startup.</li>
+         *   <li>VALIDATE — fail fast if the DB schema is behind; log pending SQL for
+         *       out-of-band execution.</li>
+         *   <li>OFF — disable schema management entirely.</li>
+         * </ul>
+         */
+        private MigrationMode mode = MigrationMode.UPDATE;
+
+        /**
+         * When {@code true}, a checksum mismatch on an already-applied migration causes
+         * a hard failure. When {@code false} (default) a warning is logged instead.
+         */
+        private boolean strictChecksum = true;
+
+        /**
+         * How long the distributed migration lock is considered valid before being treated
+         * as stale and taken over by another node. Defaults to 5 minutes.
+         */
+        private Duration lockTtl = Duration.ofMinutes(5);
+
+        /**
+         * How long to wait for the migration lock before aborting startup with an error.
+         * Defaults to 30 seconds.
+         */
+        private Duration lockWaitTimeout = Duration.ofSeconds(30);
+
+        public MigrationMode getMode() {
+            return mode;
+        }
+
+        public void setMode(MigrationMode mode) {
+            this.mode = mode;
+        }
+
+        public boolean isStrictChecksum() {
+            return strictChecksum;
+        }
+
+        public void setStrictChecksum(boolean strictChecksum) {
+            this.strictChecksum = strictChecksum;
+        }
+
+        public Duration getLockTtl() {
+            return lockTtl;
+        }
+
+        public void setLockTtl(Duration lockTtl) {
+            this.lockTtl = lockTtl;
+        }
+
+        public Duration getLockWaitTimeout() {
+            return lockWaitTimeout;
+        }
+
+        public void setLockWaitTimeout(Duration lockWaitTimeout) {
+            this.lockWaitTimeout = lockWaitTimeout;
+        }
     }
 }

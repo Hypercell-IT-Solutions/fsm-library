@@ -8,6 +8,11 @@ package io.hypercell.fsm.jdbc;
 class TestH2Dialect implements SqlDialect {
 
     @Override
+    public String id() {
+        return "h2";
+    }
+
+    @Override
     public String upsertSql(String tableName) {
         return "MERGE INTO " + tableName
                 + " (execution_id, machine_definition_id, current_state_name, failed_state_name,"

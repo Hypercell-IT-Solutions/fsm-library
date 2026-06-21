@@ -425,7 +425,7 @@ This pattern protects against configuration changes (e.g., renaming the initial 
 
 ## J. Distributed deployment with JDBC and Spring Boot
 
-For multi-replica production deployments, use `JdbcSnapshotRepository` with Spring Boot autoconfiguration. This provides distributed, database-backed persistence with automatic schema creation.
+For multi-replica production deployments, use `JdbcSnapshotRepository` with Spring Boot autoconfiguration. This provides distributed, database-backed persistence with a versioned schema migration runner that keeps the database schema up to date automatically.
 
 See [JDBC & Spring Boot autoconfiguration](08-jdbc-and-spring-boot.md) for a complete example. Quick setup:
 
@@ -433,7 +433,7 @@ See [JDBC & Spring Boot autoconfiguration](08-jdbc-and-spring-boot.md) for a com
 <dependency>
     <groupId>net.hypercell</groupId>
     <artifactId>fsm-spring-boot-starter-jdbc</artifactId>
-    <version>1.0.0-RC1</version>
+    <version>1.0.0-RC2</version>
 </dependency>
 ```
 

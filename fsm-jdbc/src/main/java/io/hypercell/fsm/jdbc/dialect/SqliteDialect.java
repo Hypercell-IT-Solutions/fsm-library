@@ -9,6 +9,11 @@ import io.hypercell.fsm.jdbc.SqlDialect;
 public class SqliteDialect implements SqlDialect {
 
     @Override
+    public String id() {
+        return "sqlite";
+    }
+
+    @Override
     public String upsertSql(String tableName) {
         return String.format("""
                 INSERT INTO %1$s (
