@@ -1,0 +1,112 @@
+name: Bug Report
+description: Report a bug or unexpected behavior in the FSM Library.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting a bug.
+
+        Before submitting:
+        - Search existing issues to avoid duplicates.
+        - If possible, provide a minimal reproducible example.
+        - Include the full stack trace if an exception is thrown.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Bug Summary
+      description: Briefly describe the bug.
+      placeholder: Describe the unexpected behavior...
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to Reproduce
+      description: List the steps required to reproduce the issue.
+      placeholder: |
+        1. Create a state machine...
+        2. Add a transition...
+        3. Execute...
+        4. Observe...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual Behavior
+      description: What actually happened?
+    validations:
+      required: true
+
+  - type: textarea
+    id: code
+    attributes:
+      label: Minimal Reproducible Example (Optional)
+      description: |
+        If possible, provide a minimal code sample that reproduces the issue.
+      render: java
+
+  - type: textarea
+    id: stacktrace
+    attributes:
+      label: Stack Trace / Logs (Optional)
+      description: Paste the complete stack trace or relevant logs.
+      render: text
+
+  - type: input
+    id: library_version
+    attributes:
+      label: FSM Library Version
+      placeholder: e.g. 1.2.0
+    validations:
+      required: true
+
+  - type: input
+    id: java_version
+    attributes:
+      label: Java Version
+      placeholder: e.g. OpenJDK 21
+    validations:
+      required: true
+
+  - type: input
+    id: build_tool
+    attributes:
+      label: Build Tool
+      placeholder: e.g. Maven 3.9.9 / Gradle 8.14
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating System
+      placeholder: e.g. Ubuntu 24.04, Windows 11, macOS 15
+
+  - type: textarea
+    id: additional_context
+    attributes:
+      label: Additional Context
+      description: Add any other context that may help us investigate the issue.
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched the existing issues and did not find a duplicate.
+          required: true
+        - label: I have provided enough information to reproduce the issue.
+          required: true

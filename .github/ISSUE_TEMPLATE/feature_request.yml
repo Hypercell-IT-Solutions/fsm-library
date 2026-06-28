@@ -1,0 +1,79 @@
+name: Feature Request
+description: Suggest a new feature or enhancement for the FSM Library.
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for taking the time to suggest an improvement.
+
+        Before submitting:
+        - Search existing issues to avoid duplicates.
+        - Describe the problem you're trying to solve, not only the solution you have in mind.
+        - If possible, include example code or API suggestions.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem Statement
+      description: What problem are you trying to solve?
+      placeholder: |
+        I'm trying to...
+        The current library doesn't allow...
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed_solution
+    attributes:
+      label: Proposed Solution
+      description: Describe the feature or API you would like to see.
+      placeholder: |
+        I would like the library to support...
+    validations:
+      required: true
+
+  - type: textarea
+    id: use_case
+    attributes:
+      label: Use Case
+      description: Explain how this feature would be used in a real project.
+      placeholder: |
+        This feature would allow...
+    validations:
+      required: true
+
+  - type: textarea
+    id: api
+    attributes:
+      label: Suggested API (Optional)
+      description: |
+        If applicable, provide an example of how you imagine the API.
+      render: java
+      placeholder: |
+        StateMachineBuilder builder = ...
+        builder.enableSomething(...);
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: Describe any alternative solutions or workarounds you've considered.
+
+  - type: textarea
+    id: additional_context
+    attributes:
+      label: Additional Context
+      description: Add any other information, references, diagrams, or screenshots that may help.
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched the existing issues and did not find a similar feature request.
+          required: true
+        - label: I have described the problem and the proposed solution.
+          required: true
