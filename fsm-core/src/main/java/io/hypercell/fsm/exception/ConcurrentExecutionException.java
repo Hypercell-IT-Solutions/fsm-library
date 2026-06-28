@@ -2,20 +2,21 @@ package io.hypercell.fsm.exception;
 
 /**
  * Thrown by StateMachineManager when a second request arrives for an executionId
- * that is already being processed by another thread.
+ * that is already being processed by another thread or process.
  * <p>
  * WHAT THIS PROTECTS:
- * Without this guard, two simultaneous HTTP requests for the same workflow could
- * both load the snapshot, both reconstitute an instance, and both call trigger().
- * The second write would silently overwrite the first checkpoint — leaving the
- * machine in an inconsistent state.
+ * Without this guard, two simultaneous requests for the same workflow could both load
+ * the snapshot, both reconstitute an instance, and both call trigger(). The second
+ * write would silently overwrite the first checkpoint — leaving the machine in an
+ * inconsistent state.
  * <p>
- * WHAT THIS DOES NOT PROTECT:
- * This is an in-process lock (ReentrantLock per executionId). It prevents concurrent
- * access within the same JVM only. For distributed deployments (multiple instances
- * behind a load balancer), the SnapshotRepository implementation must provide its
- * own concurrency control — for example optimistic locking in PostgreSQL, or
- * SET NX in Redis.
+ * SCOPE:
+ * The default {@link io.hypercell.fsm.lock.ReentrantExecutionLockProvider} protects
+ * within a single JVM only. For distributed deployments, configure
+ * {@code JdbcExecutionLockProvider} (or another cross-process implementation) on the
+ * builder via {@code .executionLockProvider(provider)} to extend protection across
+ * multiple replicas. Stale locks from crashed processes are reclaimed automatically
+ * after a configurable TTL.
  * <p>
  * CALLER GUIDANCE:
  * Catch this exception at the HTTP layer and return HTTP 409 Conflict. The client

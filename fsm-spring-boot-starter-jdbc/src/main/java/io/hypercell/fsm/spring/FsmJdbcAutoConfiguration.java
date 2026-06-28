@@ -3,7 +3,9 @@ package io.hypercell.fsm.spring;
 import io.hypercell.fsm.jdbc.JdbcSnapshotRepository;
 import io.hypercell.fsm.jdbc.SqlDialect;
 import io.hypercell.fsm.jdbc.dialect.*;
+import io.hypercell.fsm.jdbc.lock.JdbcExecutionLockProvider;
 import io.hypercell.fsm.jdbc.migration.SchemaMigrator;
+import io.hypercell.fsm.lock.ExecutionLockProvider;
 import io.hypercell.fsm.resume.SnapshotRepository;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
@@ -32,6 +34,9 @@ import javax.sql.DataSource;
  *       strict-checksum: false
  *       lock-ttl: 5m
  *       lock-wait-timeout: 30s
+ *     lock:
+ *       enabled: true       # expose ExecutionLockProvider bean (default: true)
+ *       ttl: 5m             # stale execution-lock TTL
  * }</pre>
  *
  * <p>OPTIONALITY: If you don't add this starter:
@@ -78,6 +83,49 @@ public class FsmJdbcAutoConfiguration {
                 migrationProps.getLockTtl(),
                 migrationProps.getLockWaitTimeout());
         return new JdbcSnapshotRepository(dataSource, dialect, migrator);
+    }
+
+    /**
+     * Creates a {@link JdbcExecutionLockProvider} bean if one doesn't already exist and
+     * {@code fsm.jdbc.lock.enabled} is {@code true} (the default).
+     *
+     * <p>The lock provider uses the same {@link SchemaMigrator} settings as the snapshot
+     * repository. Migrations are idempotent so running them from both beans is safe; in
+     * practice the first bean to initialize applies all pending versions and the second
+     * finds them already applied.
+     *
+     * <p>Wire the bean into your state machine definition builder:
+     * <pre>{@code
+     * @Bean
+     * public StateMachineDefinition<OrderCtx> definition(
+     *         SnapshotRepository repo,
+     *         ExecutionLockProvider lockProvider) {
+     *     return StateMachine.<OrderCtx>define("order")
+     *         .snapshotRepository(repo)
+     *         .executionLockProvider(lockProvider)
+     *         ...
+     *         .build();
+     * }
+     * }</pre>
+     *
+     * @param dataSource Spring Boot autoconfigured DataSource
+     * @param properties user configuration from application.yml / application.properties
+     * @return a new {@link JdbcExecutionLockProvider}, or skips if a bean already exists
+     */
+    @Bean
+    @ConditionalOnMissingBean(ExecutionLockProvider.class)
+    @ConditionalOnProperty(name = "fsm.jdbc.lock.enabled", havingValue = "true", matchIfMissing = true)
+    public ExecutionLockProvider executionLockProvider(DataSource dataSource, FsmJdbcProperties properties) {
+        SqlDialect dialect = selectDialect(properties.getDialect());
+        FsmJdbcProperties.Migration migrationProps = properties.getMigration();
+        SchemaMigrator migrator = new SchemaMigrator(
+                dataSource,
+                dialect,
+                migrationProps.getMode(),
+                migrationProps.isStrictChecksum(),
+                migrationProps.getLockTtl(),
+                migrationProps.getLockWaitTimeout());
+        return new JdbcExecutionLockProvider(dataSource, dialect, properties.getLock().getTtl(), migrator);
     }
 
     /**

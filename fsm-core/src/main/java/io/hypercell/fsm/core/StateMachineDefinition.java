@@ -1,5 +1,7 @@
 package io.hypercell.fsm.core;
 
+import io.hypercell.fsm.lock.ExecutionLockProvider;
+import io.hypercell.fsm.lock.ReentrantExecutionLockProvider;
 import io.hypercell.fsm.manager.StateMachineManager;
 import io.hypercell.fsm.resume.ExecutionSnapshot;
 import io.hypercell.fsm.resume.ResumePolicy;
@@ -108,6 +110,24 @@ public interface StateMachineDefinition<C> {
      * @return the recovery page size; always {@code > 0}
      */
     int recoveryPageSize();
+
+    /**
+     * The lock provider that guards concurrent access to the same execution ID.
+     * <p>
+     * The default implementation returns a new {@link ReentrantExecutionLockProvider} which
+     * is suitable for single-JVM deployments. Override in {@code DefaultStateMachineDefinition}
+     * (via the builder) to return a shared, pre-configured provider — for example
+     * {@code JdbcExecutionLockProvider} for distributed deployments.
+     * <p>
+     * Implementations of this interface that do not override this method should store and
+     * return a single instance to ensure all managers created from the same definition share
+     * one lock map.
+     *
+     * @return the lock provider; never {@code null}
+     */
+    default ExecutionLockProvider lockProvider() {
+        return new ReentrantExecutionLockProvider();
+    }
 
     /**
      * Create a fresh instance starting at the initial state.

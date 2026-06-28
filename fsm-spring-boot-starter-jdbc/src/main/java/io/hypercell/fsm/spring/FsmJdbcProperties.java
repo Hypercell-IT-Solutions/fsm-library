@@ -20,6 +20,9 @@ import java.time.Duration;
  *       strict-checksum: true          # fail on checksum mismatch (false: warn only)
  *       lock-ttl: 5m                   # stale-lock TTL (default: 5 minutes)
  *       lock-wait-timeout: 30s         # how long to wait for the migration lock (default: 30s)
+ *     lock:
+ *       enabled: true                  # expose ExecutionLockProvider bean (default: true)
+ *       ttl: 5m                        # stale execution-lock TTL (default: 5 minutes)
  * }</pre>
  *
  * <p>OPTIONALITY: This starter is OPTIONAL. You can use FSM without it:
@@ -49,6 +52,12 @@ public class FsmJdbcProperties {
     @NestedConfigurationProperty
     private Migration migration = new Migration();
 
+    /**
+     * Execution lock settings.
+     */
+    @NestedConfigurationProperty
+    private Lock lock = new Lock();
+
     public boolean isEnabled() {
         return enabled;
     }
@@ -71,6 +80,14 @@ public class FsmJdbcProperties {
 
     public void setMigration(Migration migration) {
         this.migration = migration;
+    }
+
+    public Lock getLock() {
+        return lock;
+    }
+
+    public void setLock(Lock lock) {
+        this.lock = lock;
     }
 
     /**
@@ -137,6 +154,41 @@ public class FsmJdbcProperties {
 
         public void setLockWaitTimeout(Duration lockWaitTimeout) {
             this.lockWaitTimeout = lockWaitTimeout;
+        }
+    }
+
+    /**
+     * Nested properties controlling the distributed execution-lock provider.
+     */
+    public static class Lock {
+
+        /**
+         * When {@code true} (default), a {@link io.hypercell.fsm.lock.ExecutionLockProvider}
+         * bean backed by {@link io.hypercell.fsm.jdbc.lock.JdbcExecutionLockProvider} is
+         * created. Set to {@code false} to opt out and define your own bean.
+         */
+        private boolean enabled = true;
+
+        /**
+         * How long an acquired execution lock is considered valid before being treated as
+         * stale and taken over by another node. Defaults to 5 minutes.
+         */
+        private Duration ttl = Duration.ofMinutes(5);
+
+        public boolean isEnabled() {
+            return enabled;
+        }
+
+        public void setEnabled(boolean enabled) {
+            this.enabled = enabled;
+        }
+
+        public Duration getTtl() {
+            return ttl;
+        }
+
+        public void setTtl(Duration ttl) {
+            this.ttl = ttl;
         }
     }
 }

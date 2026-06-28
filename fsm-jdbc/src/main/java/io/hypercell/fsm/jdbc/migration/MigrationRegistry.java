@@ -20,6 +20,8 @@ import java.util.List;
  *   <li>V1 — {@code create_snapshots}: the initial {@code fsm_snapshots} table and its status index.</li>
  *   <li>V2 — {@code add_attempt_number_index}: composite index on {@code (status, attempt_number)}
  *       to accelerate the {@code recoverFailedExecutions} sweep query.</li>
+ *   <li>V3 — {@code create_execution_locks}: the {@code fsm_execution_locks} table for
+ *       distributed per-execution locking via {@code JdbcExecutionLockProvider}.</li>
  * </ol>
  */
 public final class MigrationRegistry {
@@ -39,10 +41,18 @@ public final class MigrationRegistry {
     public static final Migration V2 = new Migration(2, "add_attempt_number_index");
 
     /**
+     * V3 — creates the {@code fsm_execution_locks} table used by
+     * {@link io.hypercell.fsm.jdbc.lock.JdbcExecutionLockProvider} for distributed
+     * per-execution mutual exclusion. Each row holds the lock owner and acquisition
+     * timestamp; stale locks are reclaimed after the configured TTL.
+     */
+    public static final Migration V3 = new Migration(3, "create_execution_locks");
+
+    /**
      * The complete ordered list of all registered migrations.
      * {@link SchemaMigrator} iterates this list in order to determine which versions to apply.
      */
-    public static final List<Migration> ALL = List.of(V1, V2);
+    public static final List<Migration> ALL = List.of(V1, V2, V3);
 
     private MigrationRegistry() {
     }

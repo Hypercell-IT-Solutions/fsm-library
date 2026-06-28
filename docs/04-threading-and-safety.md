@@ -11,7 +11,10 @@ This page documents the thread-safety contract for every class in the library. R
 | `StateMachineDefinition` | Yes — immutable | Safe to share across threads after `build()` |
 | `StateMachineInstance` | **No** | One thread at a time; protected by the manager's lock |
 | `ExecutionRecord` | **No** | Owned by the instance; same rule applies |
-| `DefaultStateMachineManager` | Yes | Per-`executionId` `ReentrantLock` |
+| `DefaultStateMachineManager` | Yes | Delegates per-`executionId` locking to `ExecutionLockProvider` |
+| `ExecutionLockProvider` (SPI) | Depends on impl | Plug-in point for the locking strategy |
+| `ReentrantExecutionLockProvider` | Yes | Default; `ConcurrentHashMap` of `ReentrantLock`; single-JVM only |
+| `JdbcExecutionLockProvider` | Yes | Distributed lock via `fsm_execution_locks` table; stateless after construction |
 | `InMemorySnapshotRepository` | Yes (single-JVM) | `ConcurrentHashMap`; not distributed |
 | `FileSnapshotRepository` | Yes (single-JVM) | Atomic file writes; not distributed |
 | `ThreadPoolRetryScheduler` | Yes | Daemon `ScheduledExecutorService` |
@@ -48,25 +51,25 @@ In practice, instances are short-lived within a single request or task. If you u
 
 ## DefaultStateMachineManager — per-executionId locking
 
-The manager prevents concurrent access using a `ConcurrentHashMap<String, ReentrantLock>`:
+The manager delegates per-`executionId` locking to an `ExecutionLockProvider`. The default provider uses a `ConcurrentHashMap<String, ReentrantLock>` (single-JVM). For distributed deployments, swap in `JdbcExecutionLockProvider`.
 
 ```
 request 1: trigger("order-42", "APPROVE")
-    → lock acquired for "order-42"
+    → lockProvider.acquire("order-42") → handle acquired
     → load context, reconstitute, execute, save
-    → lock released
+    → handle.close() → lock released
 
 request 2: trigger("order-42", "CANCEL")  [arrives while request 1 is running]
-    → tryLock() returns false immediately
-    → ConcurrentExecutionException thrown
+    → lockProvider.acquire("order-42") → ConcurrentExecutionException thrown immediately
     → map to HTTP 409
 ```
 
 Key properties:
 
-- **Non-blocking** — `tryLock()` is used, not `lock()`. A concurrent request fails immediately rather than queuing.
+- **Non-blocking** — `acquire()` returns immediately or throws; it never queues the caller.
 - **No deadlock risk** — each executionId gets its own independent lock; locks are never held in a hierarchy.
-- **Lock cleanup** — the lock entry is removed from the map when no threads are waiting, preventing unbounded growth.
+- **Pluggable** — swap `ExecutionLockProvider` implementations without changing any other code.
+- **Lock cleanup (in-process)** — `ReentrantExecutionLockProvider` removes the map entry when no threads are waiting, preventing unbounded growth.
 
 ### What to catch
 
@@ -85,19 +88,48 @@ try {
 
 ## Single-JVM vs distributed deployments
 
-The manager's in-process lock **only protects within a single JVM**. If you run multiple replicas:
-
 | Layer | Single-JVM | Multi-JVM (distributed) |
 |---|---|---|
-| Concurrency control | `ReentrantLock` in manager | Must be in `SnapshotRepository` |
-| Snapshot storage | `FileSnapshotRepository` | Custom DB / Redis implementation |
-| Retry scheduling | `ThreadPoolRetryScheduler` | Distributed task queue (e.g. DB-backed) |
+| Execution locking | `ReentrantExecutionLockProvider` (default) | `JdbcExecutionLockProvider` (built-in) or custom SPI |
+| Snapshot storage | `FileSnapshotRepository` | `JdbcSnapshotRepository` (built-in) or custom |
+| Retry scheduling | `ThreadPoolRetryScheduler` | `recoverFailedExecutions()` from a leader node |
 
-For distributed deployments, your custom `SnapshotRepository` must implement **optimistic locking** — for example:
-- A database `WHERE version = :expected` compare-and-swap on save
-- Redis `SET NX` or `SETNX` with a lock key per `executionId`
+### Execution locking SPI
 
-The library will call `save()` with the latest snapshot; your repository is responsible for ensuring two replicas cannot commit conflicting updates.
+`ExecutionLockProvider` is a plug-in point. Swap implementations on the builder:
+
+```java
+// Default (single-JVM):
+StateMachine.<OrderContext>define("order-workflow")
+    // no .executionLockProvider() → uses ReentrantExecutionLockProvider automatically
+    .build();
+
+// Distributed (JDBC-backed):
+StateMachine.<OrderContext>define("order-workflow")
+    .executionLockProvider(new JdbcExecutionLockProvider(dataSource, new PostgreSqlDialect()))
+    .build();
+```
+
+With Spring Boot, the `fsm-spring-boot-starter-jdbc` starter auto-configures a `JdbcExecutionLockProvider` bean when `fsm.jdbc.lock.enabled=true` (the default). Wire it into the definition bean; if none is wired the default `ReentrantExecutionLockProvider` is used.
+
+### JdbcExecutionLockProvider — how it works
+
+Backed by the `fsm_execution_locks` table (created by schema migration V3). Each in-flight execution occupies one row; releasing **deletes** the row, so the table stays sparse.
+
+**Acquire (two-step, non-blocking):**
+1. **UPDATE** — if a row exists but `locked_at` is older than the TTL (default 5 min), claim it (crashed-node takeover).
+2. **INSERT** — no row exists (normal case or after release). The database PRIMARY KEY constraint guarantees exactly one concurrent INSERT succeeds; the loser receives a duplicate-key error converted to `ConcurrentExecutionException`.
+
+**Release:** `DELETE WHERE execution_id=? AND locked_by=?` — the `AND locked_by=?` guard prevents a zombie process from deleting a lock taken over as stale.
+
+### Snapshot optimistic locking
+
+`JdbcSnapshotRepository` uses a `version` column for optimistic locking on save. Two replicas cannot commit conflicting updates to the same snapshot row — one will get a stale-version error, which surfaces as a `SnapshotException`.
+
+### Remaining distributed limitations
+
+- **Retry scheduling** — `ThreadPoolRetryScheduler` is in-process. For distributed retry, use `recoverFailedExecutions(maxAttempts)` from a leader-elected scheduled task (one replica).
+- **Redis locking** — not provided; implement `ExecutionLockProvider` to plug in Redis `SET NX`.
 
 ---
 

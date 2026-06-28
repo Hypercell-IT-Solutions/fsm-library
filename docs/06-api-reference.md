@@ -74,6 +74,7 @@ SnapshotRepository repository()
 ContextLoader<C> contextLoader()                     // context loader configured at build time
 ResumePolicy<C> resumePolicy()
 RetryCoordinator<C> retryCoordinator()
+ExecutionLockProvider lockProvider()                 // default: ReentrantExecutionLockProvider
 
 // State validation
 boolean isInitialState(String stateName)             // true if stateName is the initial state
@@ -311,6 +312,7 @@ StateMachineBuilder<C> retryPolicy(RetryPolicy p)
 StateMachineBuilder<C> retryScheduler(RetryScheduler s)
 StateMachineBuilder<C> contextLoader(Function<String, C> loader)
 StateMachineBuilder<C> resumePolicy(ResumePolicy<C> p)
+StateMachineBuilder<C> executionLockProvider(ExecutionLockProvider provider)  // default: ReentrantExecutionLockProvider
 StateMachineBuilder<C> listener(MachineEventListener<C> listener)  // repeatable
 
 StateBuilder<C> state(String name)              // inline state definition
@@ -427,7 +429,7 @@ boolean isTerminal(String stateName)
 StateMachineManager<C> withContextLoader(ContextLoader<C> contextLoader)
 ```
 
-**Per-execution lock:** Each `executionId` is protected by a non-blocking `ReentrantLock`. If another thread holds the lock, `ConcurrentExecutionException` is thrown (HTTP 409). Lock is released immediately after the call completes.
+**Per-execution lock:** Each `executionId` is protected by the configured `ExecutionLockProvider`. The default (`ReentrantExecutionLockProvider`) uses a `ReentrantLock` per ID (single-JVM). For distributed deployments, configure `JdbcExecutionLockProvider`. If the lock cannot be acquired, `ConcurrentExecutionException` is thrown (HTTP 409). The lock is released via `ExecutionLockHandle.close()` immediately after the call completes.
 
 **Throws:**
 - `ConcurrentExecutionException` — another request holds the lock; map to HTTP 409
@@ -623,9 +625,11 @@ public interface SqlDialect {
 
 If you implement a custom dialect, you must:
 1. Implement `String id()` and return a stable, lowercase identifier (e.g. `"mydb"`).
-2. Bundle migration SQL files under `io/hypercell/fsm/db/migrations/<id>/` on the classpath for every registered migration version. Currently that means two files:
+2. Bundle migration SQL files under `io/hypercell/fsm/db/migrations/<id>/` on the classpath for every registered migration version. Currently that means four files:
    - `bootstrap.sql` — creates `fsm_schema_history` and `fsm_schema_lock`, seeds the lock row
    - `V1__create_snapshots.sql` — creates the `fsm_snapshots` table and its status index
+   - `V2__add_attempt_number_index.sql` — adds the composite `(status, attempt_number)` index
+   - `V3__create_execution_locks.sql` — creates the `fsm_execution_locks` table
 
 The library bundles these files for the five built-in dialects (`postgresql`, `mysql`, `h2`, `sqlite`, `oracle`) only.
 
@@ -651,6 +655,71 @@ StateMachineManager<OrderContext> manager = StateMachine.manager(definition, rep
 The `fsm-spring-boot-starter-jdbc` module provides auto-configured `JdbcSnapshotRepository` bean using Spring's configured `DataSource`. No additional setup needed.
 
 See [Persistence & retry — JdbcSnapshotRepository](05-persistence-and-retry.md#jdbcsnapshotrepository-distributed-with-sql-databases) and [JDBC & Spring Boot](08-jdbc-and-spring-boot.md) for detailed examples.
+
+---
+
+## Execution locking — `io.hypercell.fsm.lock`
+
+### `ExecutionLockProvider`
+
+SPI for per-execution concurrency control. Implement this interface to plug in any locking backend.
+
+```java
+@FunctionalInterface
+public interface ExecutionLockProvider {
+    ExecutionLockHandle acquire(String executionId);
+    // throws ConcurrentExecutionException if the lock is held
+}
+```
+
+Built-in implementations:
+
+| Class | Scope | Notes |
+|---|---|---|
+| `ReentrantExecutionLockProvider` | Single-JVM | Default; zero dependencies; `ConcurrentHashMap<String, ReentrantLock>` |
+| `JdbcExecutionLockProvider` | Distributed | Backed by `fsm_execution_locks` table; see [JDBC & Spring Boot — Distributed locking](08-jdbc-and-spring-boot.md#distributed-execution-locking) |
+
+---
+
+### `ExecutionLockHandle`
+
+`AutoCloseable` returned by `acquire()`. Releasing the lock is always `handle.close()` — compatible with try-with-resources. `close()` is declared not to throw.
+
+```java
+public interface ExecutionLockHandle extends AutoCloseable {
+    @Override
+    void close();  // releases the lock; never throws
+}
+```
+
+---
+
+### `ReentrantExecutionLockProvider`
+
+Default single-JVM implementation. Thread-safe; share freely.
+
+```java
+ExecutionLockProvider provider = new ReentrantExecutionLockProvider();
+// or rely on the default wired by StateMachineBuilder when none is set
+```
+
+**Lock cleanup:** when a lock entry has no queued threads, it is removed from the internal map on release — no unbounded growth.
+
+---
+
+### `JdbcExecutionLockProvider`
+
+Distributed lock provider. See [JDBC & Spring Boot — Distributed locking](08-jdbc-and-spring-boot.md#distributed-execution-locking) for the full protocol description.
+
+```java
+// Two-arg constructor — auto-migration with default 5-minute TTL:
+new JdbcExecutionLockProvider(dataSource, new PostgreSqlDialect())
+
+// Four-arg constructor — custom TTL and migrator:
+new JdbcExecutionLockProvider(dataSource, dialect, Duration.ofMinutes(10), migrator)
+```
+
+`public static final String TABLE = "fsm_execution_locks"` — the table name is not configurable; it is always this constant (consistent with the `fsm_snapshots` convention).
 
 ---
 

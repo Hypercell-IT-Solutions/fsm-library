@@ -48,8 +48,9 @@ class SchemaMigratorTest {
 
         migrator.migrate();
 
-        assertThat(historyVersions(ds)).containsExactly(1, 2);
+        assertThat(historyVersions(ds)).containsExactly(1, 2, 3);
         assertThat(tableExists(ds, "fsm_snapshots")).isTrue();
+        assertThat(tableExists(ds, "fsm_execution_locks")).isTrue();
     }
 
     @Test
@@ -57,10 +58,8 @@ class SchemaMigratorTest {
         DataSource ds = newDs();
         migrator(ds).migrate();
 
-        // Both V1 and V2 must appear in history
-        assertThat(historyVersions(ds)).containsExactly(1, 2);
+        assertThat(historyVersions(ds)).containsExactly(1, 2, 3);
 
-        // The composite index introduced by V2 must exist
         boolean indexFound = false;
         try (Connection conn = ds.getConnection();
              ResultSet rs = conn.getMetaData().getIndexInfo(null, null, "FSM_SNAPSHOTS", false, false)) {
@@ -83,7 +82,7 @@ class SchemaMigratorTest {
         migrator.migrate();
         migrator.migrate();
 
-        assertThat(historyVersions(ds)).containsExactly(1, 2);
+        assertThat(historyVersions(ds)).containsExactly(1, 2, 3);
     }
 
     @Test

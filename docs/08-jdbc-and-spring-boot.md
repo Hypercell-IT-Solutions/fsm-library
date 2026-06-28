@@ -27,7 +27,7 @@ spring.datasource.password=pass
 spring.datasource.driver-class-name=org.postgresql.Driver
 ```
 
-**3. Inject the auto-configured `JdbcSnapshotRepository` and use it:**
+**3. Inject the auto-configured beans and use them:**
 
 ```java
 @Component
@@ -39,11 +39,15 @@ public class OrderWorkflowService {
     @Autowired
     private JdbcSnapshotRepository snapshotRepository;
 
+    @Autowired
+    private ExecutionLockProvider executionLockProvider;  // auto-configured by starter
+
     @Bean
     public StateMachineDefinition<OrderContext> orderWorkflow() {
         return StateMachine.<OrderContext>define("order-workflow")
             .initial("PENDING")
-            .snapshotRepository(snapshotRepository)  // auto-configured bean
+            .snapshotRepository(snapshotRepository)         // auto-configured bean
+            .executionLockProvider(executionLockProvider)   // distributed lock
             .contextLoader(orderId -> orderRepository.findById(orderId))
             .state("PENDING")
                 .on("APPROVE").to("PROCESSING").end()
@@ -118,9 +122,10 @@ public class OrderController {
 The `fsm-spring-boot-starter-jdbc` module provides:
 
 1. **`JdbcSnapshotRepository` bean** — automatically instantiated with Spring's `DataSource`
-2. **Versioned schema migration** — a Liquibase-style migration runner creates and upgrades the schema automatically on startup; two tracking tables (`fsm_schema_history`, `fsm_schema_lock`) record applied versions and guard against concurrent multi-replica migrations
-3. **Connection pooling** — uses Spring's configured `DataSource` (typically HikariCP)
-4. **No additional properties to set** — works with standard `spring.datasource.*` config
+2. **`JdbcExecutionLockProvider` bean** — distributed execution lock backed by `fsm_execution_locks`; prevents simultaneous processing of the same snapshot across replicas. Enabled by default; disable with `fsm.jdbc.lock.enabled=false` or supply your own `ExecutionLockProvider` bean.
+3. **Versioned schema migration** — a Liquibase-style migration runner creates and upgrades the schema automatically on startup; two tracking tables (`fsm_schema_history`, `fsm_schema_lock`) record applied versions and guard against concurrent multi-replica migrations
+4. **Connection pooling** — uses Spring's configured `DataSource` (typically HikariCP)
+5. **No additional properties to set** — works with standard `spring.datasource.*` config
 
 ---
 
@@ -307,7 +312,7 @@ server.port=8080
 
 On application startup, the FSM library:
 
-1. **Runs the schema migration runner** — bootstraps the two tracking tables (`fsm_schema_history`, `fsm_schema_lock`), acquires a distributed DB lock, applies any not-yet-applied versioned migrations in order (V1: creates the `fsm_snapshots` table and its status index; V2: adds the composite `(status, attempt_number)` index for the failed-execution sweep), verifies checksums of previously-applied migrations, and releases the lock. The migration is safe under concurrent multi-replica startup. See [Schema migrations](#schema-migrations) below for configuration options.
+1. **Runs the schema migration runner** — bootstraps the two tracking tables (`fsm_schema_history`, `fsm_schema_lock`), acquires a distributed DB lock, applies any not-yet-applied versioned migrations in order (V1: creates the `fsm_snapshots` table and its status index; V2: adds the composite `(status, attempt_number)` index for the failed-execution sweep; V3: creates the `fsm_execution_locks` table for distributed execution locking), verifies checksums of previously-applied migrations, and releases the lock. The migration is safe under concurrent multi-replica startup. See [Schema migrations](#schema-migrations) below for configuration options.
 2. **Calls `recoverPendingRetries()`** to resume any failed executions that are scheduled for retry.
 3. *(Optional, single-instance only)* **Calls `recoverInterruptedExecutions()`** to complete executions whose process crashed mid-transition.
 
@@ -417,6 +422,8 @@ The migration runner is controlled by `fsm.jdbc.migration.*` properties:
 | `fsm.jdbc.migration.strict-checksum` | `false` | When `true`, a checksum mismatch on an already-applied migration causes a hard startup failure. When `false` (default), a warning is logged. |
 | `fsm.jdbc.migration.lock-ttl` | `5m` | How long the distributed migration lock is considered valid before being treated as stale and taken over by another node. |
 | `fsm.jdbc.migration.lock-wait-timeout` | `30s` | How long to wait for the migration lock before aborting startup with an error. |
+| `fsm.jdbc.lock.enabled` | `true` | When `true`, expose a `JdbcExecutionLockProvider` bean. Set to `false` to opt out and supply your own `ExecutionLockProvider` bean. |
+| `fsm.jdbc.lock.ttl` | `5m` | How long an acquired execution lock is considered valid before it is treated as stale and taken over by another node (crashed-node recovery). |
 
 **Full `application.yml` example:**
 
@@ -428,8 +435,11 @@ fsm:
     migration:
       mode: UPDATE               # UPDATE (default), VALIDATE, or OFF
       strict-checksum:  true     # fail on checksum mismatch (false: warn only)
-      lock-ttl: 5m               # stale-lock TTL (default: 5 minutes)
+      lock-ttl: 5m               # stale migration-lock TTL (default: 5 minutes)
       lock-wait-timeout: 30s     # how long to wait for the migration lock (default: 30s)
+    lock:
+      enabled: true              # expose ExecutionLockProvider bean (default: true)
+      ttl: 5m                    # stale execution-lock TTL (default: 5 minutes)
 ```
 
 **Managing schema out-of-band (production teams that apply DDL themselves):**
@@ -440,8 +450,81 @@ The bundled per-dialect SQL files are located at `io/hypercell/fsm/db/migrations
 - `bootstrap.sql` — creates `fsm_schema_history` and `fsm_schema_lock` and seeds the lock row
 - `V1__create_snapshots.sql` — creates the `fsm_snapshots` table and its `status` index
 - `V2__add_attempt_number_index.sql` — adds the composite `(status, attempt_number)` index for the `recoverFailedExecutions` sweep
+- `V3__create_execution_locks.sql` — creates the `fsm_execution_locks` table used by `JdbcExecutionLockProvider`
 
 You can apply these files directly with your database CLI, or feed them into an existing Flyway/Liquibase pipeline. `VALIDATE` mode is the recommended choice for production teams that apply DDL through a controlled change-management process: it guarantees the application will not start against a schema that is behind, without ever touching the database itself.
+
+---
+
+## Distributed execution locking
+
+The `fsm-spring-boot-starter-jdbc` starter auto-configures a `JdbcExecutionLockProvider` bean that prevents two service instances from processing the same snapshot simultaneously.
+
+### How it works
+
+Before any `trigger()`, `proceed()`, `resume()`, or recovery call, the manager acquires a lock for the `executionId`. `JdbcExecutionLockProvider` uses the `fsm_execution_locks` table (created by migration V3):
+
+| Column | Type | Description |
+|---|---|---|
+| `execution_id` | VARCHAR(255) PK | The snapshot key being locked |
+| `locked_by` | VARCHAR(255) | `hostname@pid#threadId` of the owning node |
+| `locked_at` | VARCHAR(255) | ISO-8601 timestamp when the lock was acquired |
+
+Acquire is a two-step, non-blocking operation:
+1. **UPDATE (stale takeover)** — if a row exists with `locked_at` older than the TTL (default 5 min), claim it as stale. Handles crashed-node recovery automatically.
+2. **INSERT (normal path)** — no row exists (fresh execution or lock was released). The PRIMARY KEY constraint ensures exactly one concurrent INSERT wins; the loser receives `ConcurrentExecutionException` immediately.
+
+Release **deletes** the row rather than NULLing columns, keeping the table sparse (only in-flight and stale locks have rows).
+
+### Wiring into your definition
+
+The starter exposes `ExecutionLockProvider` as a Spring bean. Wire it into your definition:
+
+```java
+@Configuration
+public class OrderWorkflowConfig {
+
+    @Bean
+    public StateMachineDefinition<OrderContext> orderWorkflow(
+            JdbcSnapshotRepository snapshotRepository,
+            ExecutionLockProvider executionLockProvider,  // auto-configured by starter
+            OrderRepository orderRepository) {
+
+        return StateMachine.<OrderContext>define("order-workflow")
+            .initial("PENDING")
+            .snapshotRepository(snapshotRepository)
+            .executionLockProvider(executionLockProvider)   // <- distributed lock
+            .contextLoader(orderId -> { ... })
+            // ... states
+            .build();
+    }
+}
+```
+
+If no `ExecutionLockProvider` is wired, the definition falls back to `ReentrantExecutionLockProvider` (single-JVM only).
+
+### Disabling or replacing the lock provider
+
+```yaml
+# Disable the auto-configured bean (define your own @Bean ExecutionLockProvider):
+fsm:
+  jdbc:
+    lock:
+      enabled: false
+```
+
+Or supply a custom `@Bean ExecutionLockProvider` — `@ConditionalOnMissingBean` ensures the starter's bean is skipped.
+
+### Stale-lock TTL
+
+If a node crashes mid-execution, its lock row remains in the table. The next node that tries to acquire the same lock will claim it via the UPDATE path once `locked_at` is older than `fsm.jdbc.lock.ttl` (default 5 minutes). Set this to a value comfortably longer than your longest expected execution:
+
+```yaml
+fsm:
+  jdbc:
+    lock:
+      ttl: 10m   # override if sub-steps can run longer than 5 minutes
+```
 
 ---
 

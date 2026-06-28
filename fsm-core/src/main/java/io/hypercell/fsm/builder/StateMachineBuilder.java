@@ -5,6 +5,8 @@ import io.hypercell.fsm.exception.StateMachineConfigurationException;
 import io.hypercell.fsm.execution.DefaultStateMachineDefinition;
 import io.hypercell.fsm.listener.EventBus;
 import io.hypercell.fsm.listener.MachineEventListener;
+import io.hypercell.fsm.lock.ExecutionLockProvider;
+import io.hypercell.fsm.lock.ReentrantExecutionLockProvider;
 import io.hypercell.fsm.manager.StateMachineManager;
 import io.hypercell.fsm.resume.DefaultResumePolicy;
 import io.hypercell.fsm.resume.ExecutionSnapshot;
@@ -53,6 +55,7 @@ public class StateMachineBuilder<C> {
     private ContextLoader<C> contextLoader = null;
     private ExecutorService recoveryExecutor = null;
     private int recoveryPageSize = DefaultStateMachineDefinition.DEFAULT_RECOVERY_PAGE_SIZE;
+    private ExecutionLockProvider executionLockProvider = new ReentrantExecutionLockProvider();
 
     public StateMachineBuilder(String id) {
         this.id = id;
@@ -166,6 +169,24 @@ public class StateMachineBuilder<C> {
     }
 
     /**
+     * Override the lock provider used to guard concurrent access to the same execution ID.
+     * <p>
+     * Defaults to {@link ReentrantExecutionLockProvider} (single-JVM, in-process locking).
+     * For distributed deployments, supply a {@code JdbcExecutionLockProvider} or another
+     * implementation that coordinates across JVM boundaries.
+     * <p>
+     * The provider is shared across all managers created from this definition. Provide a
+     * single, pre-configured instance so that the internal lock state is shared.
+     *
+     * @param lockProvider the lock provider; must not be {@code null}
+     */
+    public StateMachineBuilder<C> executionLockProvider(ExecutionLockProvider lockProvider) {
+        if (lockProvider == null) throw new IllegalArgumentException("executionLockProvider must not be null");
+        executionLockProvider = lockProvider;
+        return this;
+    }
+
+    /**
      * Register an event listener. Multiple calls add multiple listeners;
      * events are dispatched in registration order.
      */
@@ -257,7 +278,7 @@ public class StateMachineBuilder<C> {
         DefaultStateMachineDefinition<C> def = new DefaultStateMachineDefinition<>(
                 id, stateMap.get(initialStateName), stateMap, transitionMap,
                 resumePolicy, snapshotRepository, coordinator, bus, contextLoader, recoveryExecutor,
-                recoveryPageSize);
+                recoveryPageSize, executionLockProvider);
         ref.set(def);
         return def;
     }
@@ -327,6 +348,11 @@ public class StateMachineBuilder<C> {
         @Override
         public int recoveryPageSize() {
             return d.recoveryPageSize();
+        }
+
+        @Override
+        public ExecutionLockProvider lockProvider() {
+            return d.lockProvider();
         }
 
         @Override

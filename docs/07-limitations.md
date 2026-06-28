@@ -27,15 +27,18 @@ or to accept community contributions safely.
 
 ---
 
-### 2. No built-in distributed `SnapshotRepository`
+### 2. No built-in Redis locking or snapshot storage
 
-**Problem:** Only `InMemorySnapshotRepository` (testing) and `FileSnapshotRepository`
-(single-JVM) are provided. Production deployments on multiple replicas require a custom
-repository implementation backed by a database or Redis with optimistic locking.
+**Status (partially resolved):** `JdbcSnapshotRepository` (with optimistic locking) and
+`JdbcExecutionLockProvider` (with TTL-based stale-lock takeover) are now built-in for SQL
+databases. The `fsm-spring-boot-starter-jdbc` module auto-configures both.
 
-**Suggested improvement:** Ship an optional `fsm-spring-jdbc` or `fsm-redis` module
-providing a reference distributed repository. At minimum, document the exact schema and
-locking contract a database implementation must satisfy.
+**Remaining gap:** There is no Redis-backed implementation of `ExecutionLockProvider` or
+`SnapshotRepository`. Redis users must implement the `ExecutionLockProvider` SPI
+(`SET NX` with TTL) and a custom `SnapshotRepository`.
+
+**Suggested improvement:** Ship an optional `fsm-redis` module providing
+`RedisExecutionLockProvider` and `RedisSnapshotRepository`.
 
 ---
 
@@ -207,9 +210,9 @@ remove `retryCoordinator()` from the `StateMachineDefinition` public interface a
 | Priority | Item | Type |
 |---|---|---|
 | High | No test suite (#1) | Architecture gap |
-| Medium | No distributed repository (#2) | Architecture gap |
 | Medium | No `shutdown()` on manager (#3) | Architecture gap |
 | Medium | `ExecutionSnapshot.setStatus()` mutability (#11) | Minor |
+| Low | No Redis lock/snapshot module (#2) | Architecture gap |
 | Low | Async listeners (#4) | Architecture gap |
 | Low | Async actions (#5) | Architecture gap |
 | Low | Parallel sub-steps (#6) | Architecture gap |

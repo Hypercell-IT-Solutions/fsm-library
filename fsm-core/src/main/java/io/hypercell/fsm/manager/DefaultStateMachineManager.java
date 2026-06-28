@@ -5,6 +5,8 @@ import io.hypercell.fsm.core.ExecutionStatus;
 import io.hypercell.fsm.core.StateMachineDefinition;
 import io.hypercell.fsm.core.StateMachineInstance;
 import io.hypercell.fsm.exception.*;
+import io.hypercell.fsm.lock.ExecutionLockHandle;
+import io.hypercell.fsm.lock.ExecutionLockProvider;
 import io.hypercell.fsm.resume.ExecutionSnapshot;
 import io.hypercell.fsm.resume.SnapshotRepository;
 import io.hypercell.fsm.resume.SnapshotStatus;
@@ -15,27 +17,29 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
-import java.util.concurrent.*;
-import java.util.concurrent.locks.ReentrantLock;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Default implementation of {@link StateMachineManager}.
  * <p>
  * CONCURRENCY MODEL:
- * A {@code ConcurrentHashMap<executionId, ReentrantLock>} provides per-execution in-process
- * locking. {@code ReentrantLock.tryLock()} returns immediately (non-blocking): if the lock
- * is held by another thread, {@link io.hypercell.fsm.exception.ConcurrentExecutionException}
- * is thrown rather than blocking the caller. This maps naturally to HTTP: return 409 Conflict
- * immediately rather than making the client wait.
+ * Per-execution locking is delegated to the configured {@link ExecutionLockProvider}.
+ * The default provider ({@link io.hypercell.fsm.lock.ReentrantExecutionLockProvider}) uses
+ * a {@code ConcurrentHashMap<executionId, ReentrantLock>} for single-JVM protection.
+ * For distributed deployments, configure a {@code JdbcExecutionLockProvider} or equivalent
+ * on the builder via {@code .executionLockProvider(provider)}.
  * <p>
- * Lock entries are cleaned up after each call to avoid unbounded map growth. Entries are only
- * removed when no thread is waiting — checked via {@code ReentrantLock.hasQueuedThreads()}.
+ * {@code tryLock()} semantics are preserved: if the lock is held, the provider throws
+ * {@link ConcurrentExecutionException} immediately (maps to HTTP 409 Conflict).
  * <p>
  * STRICT TRIGGER CONTRACT:
  * {@link #trigger(String, String)} applies exactly one transition. Executions that require
  * prior recovery (FAILED → {@link #proceed(String)}, RUNNING → {@link #resume(String)}) or
  * are not yet retryable (RETRY_SCHEDULED) cause
- * {@link io.hypercell.fsm.exception.IllegalTriggerStateException} to be thrown immediately.
+ * {@link IllegalTriggerStateException} to be thrown immediately.
  * The caller is responsible for explicit recovery before re-triggering.
  *
  * @param <C> the context type flowing through the machine
@@ -46,15 +50,17 @@ public class DefaultStateMachineManager<C> implements StateMachineManager<C> {
     private final StateMachineDefinition<C> definition;
     private final SnapshotRepository repository;
     private final ContextLoader<C> contextLoader;
-    private final ConcurrentHashMap<String, ReentrantLock> locks = new ConcurrentHashMap<>();
+    private final ExecutionLockProvider lockProvider;
     private final ScheduledExecutorService recoveryExecutor;
 
     DefaultStateMachineManager(StateMachineDefinition<C> definition,
                                SnapshotRepository repository,
-                               ContextLoader<C> contextLoader) {
+                               ContextLoader<C> contextLoader,
+                               ExecutionLockProvider lockProvider) {
         this.definition = definition;
         this.repository = repository;
         this.contextLoader = contextLoader;
+        this.lockProvider = lockProvider;
         this.recoveryExecutor = Executors.newScheduledThreadPool(1, r -> {
             Thread t = new Thread(r, "fsm-recovery");
             t.setDaemon(true);
@@ -69,11 +75,8 @@ public class DefaultStateMachineManager<C> implements StateMachineManager<C> {
 
     @Override
     public ManagedTransitionResult<C> trigger(String executionId, String event, C contextOverride) {
-        ReentrantLock lock = acquireLock(executionId);
-        try {
+        try (ExecutionLockHandle handle = lockProvider.acquire(executionId)) {
             return doTrigger(executionId, event, contextOverride);
-        } finally {
-            releaseLock(executionId, lock);
         }
     }
 
@@ -84,11 +87,8 @@ public class DefaultStateMachineManager<C> implements StateMachineManager<C> {
 
     @Override
     public ManagedTransitionResult<C> proceed(String executionId, C contextOverride) {
-        ReentrantLock lock = acquireLock(executionId);
-        try {
+        try (ExecutionLockHandle handle = lockProvider.acquire(executionId)) {
             return doProceed(executionId, contextOverride);
-        } finally {
-            releaseLock(executionId, lock);
         }
     }
 
@@ -99,11 +99,8 @@ public class DefaultStateMachineManager<C> implements StateMachineManager<C> {
 
     @Override
     public ManagedTransitionResult<C> initialize(String executionId, C contextOverride) {
-        ReentrantLock lock = acquireLock(executionId);
-        try {
+        try (ExecutionLockHandle handle = lockProvider.acquire(executionId)) {
             return doInitialize(executionId, contextOverride);
-        } finally {
-            releaseLock(executionId, lock);
         }
     }
 
@@ -135,7 +132,7 @@ public class DefaultStateMachineManager<C> implements StateMachineManager<C> {
 
     @Override
     public StateMachineManager<C> withContextLoader(ContextLoader<C> contextLoader) {
-        return new DefaultStateMachineManager<>(definition, repository, contextLoader);
+        return new DefaultStateMachineManager<>(definition, repository, contextLoader, lockProvider);
     }
 
     @Override
@@ -186,8 +183,7 @@ public class DefaultStateMachineManager<C> implements StateMachineManager<C> {
 
     @Override
     public ManagedTransitionResult<C> resume(String executionId) {
-        ReentrantLock lock = acquireLock(executionId);
-        try {
+        try (ExecutionLockHandle handle = lockProvider.acquire(executionId)) {
             ExecutionSnapshot snapshot = repository.load(executionId)
                     .orElseThrow(() -> new IllegalArgumentException(
                             "No snapshot found for executionId: " + executionId));
@@ -246,8 +242,6 @@ public class DefaultStateMachineManager<C> implements StateMachineManager<C> {
                         .context(instance.context())
                         .build();
             }
-        } finally {
-            releaseLock(executionId, lock);
         }
     }
 
@@ -353,11 +347,10 @@ public class DefaultStateMachineManager<C> implements StateMachineManager<C> {
      * was read), bumps {@code attempt_number} by 1, then calls {@link #doProceed} directly
      * under the held lock (doProceed does not itself acquire the lock — only the public
      * {@link #proceed(String)} wrapper does — so this is safe and avoids re-entrancy).
-     * Exceptions are caught and logged per-execution; releaseLock runs in finally.
+     * Exceptions are caught and logged per-execution; the lock handle is closed in finally.
      */
     private void retryFailedOnce(String executionId, int maxAttempts) {
-        ReentrantLock lock = acquireLock(executionId);
-        try {
+        try (ExecutionLockHandle handle = lockProvider.acquire(executionId)) {
             Optional<ExecutionSnapshot> opt = repository.load(executionId);
             if (opt.isEmpty()) return;
             ExecutionSnapshot snap = opt.get();
@@ -370,11 +363,12 @@ public class DefaultStateMachineManager<C> implements StateMachineManager<C> {
                 log.error("[recoverFailedExecutions] Failed to retry '{}': {}",
                         executionId, result.getRootCause().getMessage(), result.getRootCause());
             }
+        } catch (ConcurrentExecutionException e) {
+            log.warn("[recoverFailedExecutions] Execution '{}' is locked, skipping retry: {}",
+                    executionId, e.getMessage());
         } catch (Exception e) {
             log.error("[recoverFailedExecutions] Failed to retry '{}': {}",
                     executionId, e.getMessage(), e);
-        } finally {
-            releaseLock(executionId, lock);
         }
     }
 
@@ -613,31 +607,5 @@ public class DefaultStateMachineManager<C> implements StateMachineManager<C> {
         throw new IllegalStateException(
                 "No ctx available for executionId '" + executionId + "'. " +
                         "Either configure a contextLoader or pass a contextOverride.");
-    }
-
-    /**
-     * Acquire the per-executionId lock. Returns immediately.
-     * Throws ConcurrentExecutionException if another thread holds the lock.
-     * <p>
-     * NOTE: This is in-process only. For distributed deployments, implement
-     * optimistic locking in your SnapshotRepository (e.g. compare-and-swap
-     * in PostgreSQL, or SET NX with TTL in Redis).
-     */
-    private ReentrantLock acquireLock(String executionId) {
-        ReentrantLock lock = locks.computeIfAbsent(executionId, k -> new ReentrantLock());
-        if (!lock.tryLock()) {
-            throw new ConcurrentExecutionException(executionId);
-        }
-        return lock;
-    }
-
-    /**
-     * Release the lock and clean up the map entry if no threads are waiting.
-     * Prevents unbounded growth of the locks map for long-running applications.
-     */
-    private void releaseLock(String executionId, ReentrantLock lock) {
-        lock.unlock();
-        locks.computeIfPresent(executionId, (k, l) ->
-                l.hasQueuedThreads() ? l : null);
     }
 }

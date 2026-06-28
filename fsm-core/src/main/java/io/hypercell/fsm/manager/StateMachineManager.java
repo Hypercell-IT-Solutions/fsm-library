@@ -362,10 +362,11 @@ public interface StateMachineManager<C> {
     /**
      * The only way to create a StateMachineManager.
      * Keeps DefaultStateMachineManager invisible to consumers.
-     * Uses the context loader from the definition.
+     * Uses the context loader and lock provider from the definition.
      */
     static <C> StateMachineManager<C> create(StateMachineDefinition<C> definition,
                                              SnapshotRepository repository) {
-        return new DefaultStateMachineManager<>(definition, repository, definition.contextLoader());
+        return new DefaultStateMachineManager<>(definition, repository, definition.contextLoader(),
+                definition.lockProvider());
     }
 }
