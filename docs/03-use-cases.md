@@ -433,7 +433,7 @@ See [JDBC & Spring Boot autoconfiguration](08-jdbc-and-spring-boot.md) for a com
 <dependency>
     <groupId>net.hypercell</groupId>
     <artifactId>fsm-spring-boot-starter-jdbc</artifactId>
-    <version>1.0.0-RC2</version>
+    <version>1.0.0-RC3</version>
 </dependency>
 ```
 
@@ -452,7 +452,7 @@ public StateMachineManager<OrderContext> orderManager(
 }
 ```
 
-All `trigger()` and `proceed()` calls use optimistic locking to ensure only one replica commits a snapshot at a time. The library automatically retries transient conflicts.
+All `trigger()` and `proceed()` calls use optimistic locking to ensure only one replica commits a snapshot at a time. The library automatically retries transient conflicts. The starter also auto-configures a `JdbcExecutionLockProvider` (backed by the `fsm_execution_locks` table, with TTL-bounded stale-lock takeover) so two replicas never process the same `executionId` concurrently — wire it into the definition with `.executionLockProvider(...)`. See [JDBC & Spring Boot — Distributed execution locking](08-jdbc-and-spring-boot.md#distributed-execution-locking).
 
 ---
 

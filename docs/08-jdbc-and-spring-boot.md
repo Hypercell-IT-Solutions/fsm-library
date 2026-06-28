@@ -12,7 +12,7 @@ For Spring Boot applications, the `fsm-spring-boot-starter-jdbc` module provides
 <dependency>
     <groupId>net.hypercell</groupId>
     <artifactId>fsm-spring-boot-starter-jdbc</artifactId>
-    <version>1.0.0-RC2</version>
+    <version>1.0.0-RC3</version>
 </dependency>
 ```
 

@@ -178,7 +178,7 @@ For production deployments across multiple JVMs, use `JdbcSnapshotRepository`. I
 <dependency>
     <groupId>net.hypercell</groupId>
     <artifactId>fsm-jdbc</artifactId>
-    <version>1.0.0-RC2</version>
+    <version>1.0.0-RC3</version>
 </dependency>
 ```
 

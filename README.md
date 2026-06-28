@@ -4,7 +4,7 @@ A lightweight, production-ready **Java finite state machine (FSM) library** for 
 
 Define your workflow as a **type-safe state machine** in Java 17. Run it synchronously in a single process, or drive it across multiple HTTP requests with full failure recovery and automatic retry — without writing any orchestration plumbing yourself.
 
-> **Status:** 1.0.0-RC2 — public API is stable; finalising enhancements before 1.0.0 GA.
+> **Status:** 1.0.0-RC3 — public API is stable; finalising enhancements before 1.0.0 GA.
 
 ---
 
@@ -14,7 +14,7 @@ Most Java workflow libraries are either too heavy (full BPM engines) or too simp
 
 - **Failure recovery** — sub-steps are checkpointed; the machine resumes exactly where it stopped after a crash or restart
 - **Automatic retry** — configurable exponential backoff or fixed delay between retry attempts
-- **Concurrent request safety** — per-execution locking prevents two HTTP requests from corrupting the same workflow
+- **Concurrent execution safety** — per-execution locking prevents two requests, or two service replicas, from processing the same workflow at once
 - **Database persistence** — built-in JDBC support for PostgreSQL, MySQL, MariaDB, H2, SQLite, and Oracle
 - **Spring Boot integration** — zero-config autoconfiguration with `fsm-spring-boot-starter-jdbc`
 
@@ -35,6 +35,7 @@ Most Java workflow libraries are either too heavy (full BPM engines) or too simp
 - **JDBC persistence** — `JdbcSnapshotRepository` for distributed multi-replica deployments
 - **Spring Boot autoconfiguration** — optional `fsm-spring-boot-starter-jdbc` for zero-config JDBC setup
 - **Pluggable storage** — `InMemorySnapshotRepository` (tests), `FileSnapshotRepository` (single-JVM), or `JdbcSnapshotRepository` (distributed)
+- **Pluggable execution locking** — `ExecutionLockProvider` SPI; `ReentrantExecutionLockProvider` (default, single-JVM) or `JdbcExecutionLockProvider` (distributed, TTL-bounded stale-lock takeover via the `fsm_execution_locks` table)
 - **Spring-friendly** — class-based `StateConfigurer` and `SubStepHandler` interfaces for Spring dependency injection
 
 ---
@@ -47,7 +48,7 @@ Add the dependency to your `pom.xml`:
 <dependency>
     <groupId>net.hypercell</groupId>
     <artifactId>fsm-core</artifactId>
-    <version>1.0.0-RC2</version>
+    <version>1.0.0-RC3</version>
 </dependency>
 ```
 
@@ -83,7 +84,7 @@ For distributed deployments with Spring Boot and PostgreSQL, add the starter:
 <dependency>
     <groupId>net.hypercell</groupId>
     <artifactId>fsm-spring-boot-starter-jdbc</artifactId>
-    <version>1.0.0-RC2</version>
+    <version>1.0.0-RC3</version>
 </dependency>
 ```
 
@@ -126,10 +127,11 @@ fsm-library/
 │       └── retry/                  retry policies & scheduling
 │
 ├── fsm-jdbc/                       JDBC persistence (PostgreSQL, MySQL, MariaDB, H2, SQLite, Oracle)
-│   └── JdbcSnapshotRepository      distributed snapshots with optimistic locking
+│   ├── JdbcSnapshotRepository      distributed snapshots with optimistic locking
+│   └── JdbcExecutionLockProvider   distributed per-execution lock (fsm_execution_locks, TTL takeover)
 │
 ├── fsm-spring-boot-starter-jdbc/   Spring Boot autoconfiguration for JDBC
-│   └── auto-configures JdbcSnapshotRepository using Spring's DataSource
+│   └── auto-configures JdbcSnapshotRepository and JdbcExecutionLockProvider using Spring's DataSource
 │
 └── fsm-examples/                   Runnable examples demonstrating all patterns
     ├── SynchronousWorkflowExample  direct instance use
