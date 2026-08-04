@@ -202,8 +202,14 @@ import io.hypercell.fsm.listener.MachineEvent.*;
 
 MachineEventListener<OrderContext> auditListener = new MachineEventListener<>() {
     @Override
+    public void onInstanceCreated(InstanceCreatedEvent<OrderContext> e) {
+        // Fires before any state is entered or sub-step runs.
+        metrics.increment("order.started." + e.getOrigin());   // NEW, RESUMED_FAILED, …
+    }
+
+    @Override
     public void onTransitionFired(TransitionFiredEvent<OrderContext> e) {
-        audit.record(e.executionId(), e.fromState(), e.toState(), e.event());
+        audit.record(e.getExecutionId(), e.getFromState(), e.getToState(), e.getEvent());
     }
 
     @Override
@@ -213,8 +219,10 @@ MachineEventListener<OrderContext> auditListener = new MachineEventListener<>() 
 
     @Override
     public void onMachineFailed(MachineFailedEvent<OrderContext> e) {
-        metrics.increment("order.failed");
-        alerts.notify(e.executionId(), e.failedSubStepName());
+        metrics.increment("order.failed." + e.getDisposition());
+        // The context is on every event — no need to re-load the order.
+        alerts.notify(e.getContext().getOrderId(), e.getSubStepName(),
+                      e.getFailureContext().error());
     }
 };
 
@@ -226,7 +234,20 @@ StateMachineDefinition<OrderContext> machine = StateMachine.<OrderContext>define
     .build();
 ```
 
-Listeners run **synchronously** on the thread that called `trigger()` or `proceed()`. Keep them fast.
+Listeners run **synchronously** on the thread that called `trigger()` or `proceed()`. Keep them fast. `e.getContext()` is the live domain object — read it, don't mutate it.
+
+Listeners are registered on the builder only; the set is frozen at `build()`.
+
+### Correlation IDs and the MDC
+
+To stamp a correlation ID into the logging MDC for the whole execution, use `executionScopeProvider` rather than `onInstanceCreated`. The library closes the scope in a `finally`, which matters because the recovery sweeps run on a shared pooled executor where an uncleared thread-local would leak into the next execution:
+
+```java
+.executionScopeProvider(info -> {
+    MDC.put("correlationId", info.context().getCorrelationId());
+    return () -> MDC.remove("correlationId");
+})
+```
 
 ---
 

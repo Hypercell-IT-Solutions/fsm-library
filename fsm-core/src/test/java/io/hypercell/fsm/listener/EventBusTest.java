@@ -15,7 +15,7 @@ class EventBusTest {
     void empty_publishIsNoOp() {
         EventBus<OrderContext> bus = EventBus.empty();
         assertThat(bus.hasListeners()).isFalse();
-        assertThatCode(() -> bus.publish(new MachineEvent.StateEnteredEvent<>("exec-1", "order", "PENDING")))
+        assertThatCode(() -> bus.publish(new MachineEvent.StateEnteredEvent<>("exec-1", "order", null, "PENDING")))
                 .doesNotThrowAnyException();
     }
 
@@ -37,7 +37,7 @@ class EventBusTest {
         };
 
         EventBus<OrderContext> bus = new EventBus<>(List.of(l1, l2));
-        bus.publish(new MachineEvent.StateEnteredEvent<>("exec-1", "order", "PENDING"));
+        bus.publish(new MachineEvent.StateEnteredEvent<>("exec-1", "order", null, "PENDING"));
 
         assertThat(received).containsExactly("listener-1", "listener-2");
     }
@@ -61,7 +61,7 @@ class EventBusTest {
 
         EventBus<OrderContext> bus = new EventBus<>(List.of(throwing, good));
         assertThatCode(() ->
-                bus.publish(new MachineEvent.StateEnteredEvent<>("exec-1", "order", "PENDING"))
+                bus.publish(new MachineEvent.StateEnteredEvent<>("exec-1", "order", null, "PENDING"))
         ).doesNotThrowAnyException();
 
         assertThat(received).containsExactly("good-listener");

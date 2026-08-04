@@ -16,6 +16,7 @@ import java.time.format.DateTimeFormatter;
  *     ...
  * }</pre>
  * Example output:
+ * [ORDER] 10:42:01 | CREATED    | order-42 | NEW | at 'PENDING' | attempt 0
  * [ORDER] 10:42:01 | ENTERED    | PROCESSING
  * [ORDER] 10:42:01 | STEP  ✓   | PROCESSING / charge-payment
  * [ORDER] 10:42:01 | STEP  ✗   | PROCESSING / notify-warehouse | Warehouse API is down
@@ -45,6 +46,13 @@ public class LoggingEventListener<C> implements MachineEventListener<C> {
 
     public static <C> LoggingEventListener<C> create() {
         return new LoggingEventListener<>("[FSM]");
+    }
+
+    @Override
+    public void onInstanceCreated(MachineEvent.InstanceCreatedEvent<C> e) {
+        log("CREATED   ", String.format("%s | %s | at '%s' | attempt %d",
+                e.getExecutionId(), e.getOrigin(), e.getCurrentStateName(),
+                e.getAttemptNumber()), e);
     }
 
     @Override
@@ -87,8 +95,8 @@ public class LoggingEventListener<C> implements MachineEventListener<C> {
 
     @Override
     public void onMachineFailed(MachineEvent.MachineFailedEvent<C> e) {
-        log("FAILED    ", String.format("%s | attempt %d | failed at '%s / %s' | %s",
-                e.getExecutionId(), e.getAttemptNumber(),
+        log("FAILED    ", String.format("%s | attempt %d | %d failure(s) | failed at '%s / %s' | %s",
+                e.getExecutionId(), e.getFailureContext().attemptNumber(), e.getFailureCount(),
                 e.getStateName(), e.getSubStepName(), e.getDisposition()), e);
     }
 

@@ -8,6 +8,7 @@ import io.hypercell.fsm.failure.FailureContext;
 import io.hypercell.fsm.failure.FailureDisposition;
 import io.hypercell.fsm.failure.FailurePolicy;
 import io.hypercell.fsm.listener.EventBus;
+import io.hypercell.fsm.listener.InstanceOrigin;
 import io.hypercell.fsm.listener.MachineEvent;
 import io.hypercell.fsm.resume.ExecutionSnapshot;
 import io.hypercell.fsm.resume.SnapshotRepository;
@@ -81,9 +82,13 @@ public class DefaultStateMachineInstance<C> implements StateMachineInstance<C> {
         this.subStepRunner = new SubStepRunner<>(
                 definition.resumePolicy(), this.eventBus, executionId, definition.id());
 
+        this.eventBus.publish(new MachineEvent.InstanceCreatedEvent<>(
+                executionId, definition.id(), ctx, InstanceOrigin.NEW,
+                initialState.name(), this.attemptNumber));
+
         runEntryHook(initialState);
         this.eventBus.publish(new MachineEvent.StateEnteredEvent<>(
-                executionId, definition.id(), initialState.name()));
+                executionId, definition.id(), ctx, initialState.name()));
 
         if (!initialState.subSteps().isEmpty()) {
             saveCheckpoint();
@@ -111,7 +116,8 @@ public class DefaultStateMachineInstance<C> implements StateMachineInstance<C> {
                                 ExecutionStatus initialStatus,
                                 SnapshotRepository snapshotRepository,
                                 RetryCoordinator<C> retryCoordinator,
-                                EventBus<C> eventBus) {
+                                EventBus<C> eventBus,
+                                InstanceOrigin origin) {
         this.executionId = hydratedRecord.getExecutionId();
         this.definition = definition;
         this.currentState = failedState;
@@ -125,6 +131,10 @@ public class DefaultStateMachineInstance<C> implements StateMachineInstance<C> {
 
         this.subStepRunner = new SubStepRunner<>(
                 definition.resumePolicy(), this.eventBus, executionId, definition.id());
+
+        this.eventBus.publish(new MachineEvent.InstanceCreatedEvent<>(
+                executionId, definition.id(), ctx, origin,
+                hydratedRecord.getCurrentStateName(), attemptNumber));
     }
 
     @Override
@@ -147,7 +157,7 @@ public class DefaultStateMachineInstance<C> implements StateMachineInstance<C> {
         String fromState = currentState.name();
         runExitHook(currentState);
         eventBus.publish(new MachineEvent.StateExitedEvent<>(
-                executionId, definition.id(), fromState));
+                executionId, definition.id(), ctx, fromState));
 
         transition.action().ifPresent(action -> {
             try {
@@ -167,11 +177,11 @@ public class DefaultStateMachineInstance<C> implements StateMachineInstance<C> {
         executionRecord.moveTo(nextState.name());
 
         eventBus.publish(new MachineEvent.TransitionFiredEvent<>(
-                executionId, definition.id(), fromState, nextState.name(), event));
+                executionId, definition.id(), ctx, fromState, nextState.name(), event));
 
         runEntryHook(nextState);
         eventBus.publish(new MachineEvent.StateEnteredEvent<>(
-                executionId, definition.id(), nextState.name()));
+                executionId, definition.id(), ctx, nextState.name()));
 
         if (!nextState.subSteps().isEmpty()) {
             saveCheckpoint();
@@ -201,7 +211,7 @@ public class DefaultStateMachineInstance<C> implements StateMachineInstance<C> {
         }
 
         eventBus.publish(new MachineEvent.MachineResumedEvent<>(
-                executionId, definition.id(),
+                executionId, definition.id(), ctx,
                 executionRecord.getFailedStateName(),
                 executionRecord.getFailedSubStepName(),
                 executionRecord.getSteps().size()));
@@ -311,7 +321,7 @@ public class DefaultStateMachineInstance<C> implements StateMachineInstance<C> {
                 snapshotRepository.save(executionId, takeCheckpoint().withStatus(SnapshotStatus.TERMINATED));
             }
             eventBus.publish(new MachineEvent.MachineCompletedEvent<>(
-                    executionId, definition.id(), state.name()));
+                    executionId, definition.id(), ctx, state.name()));
         }
     }
 
@@ -333,8 +343,10 @@ public class DefaultStateMachineInstance<C> implements StateMachineInstance<C> {
         String subStepName = runResult.getFailedSubStepName();
         String sourceStateName = executionRecord.getPreviousStateName();
 
-        FailureDisposition disposition = resolveDisposition(
+        FailureContext<C> failure = buildFailureContext(
                 state, runResult, pendingEvent, sourceStateName);
+
+        FailureDisposition disposition = resolveDisposition(state, runResult, failure);
 
         if (disposition == FailureDisposition.REWIND
                 && !canRewind(stateName, sourceStateName)) {
@@ -352,11 +364,11 @@ public class DefaultStateMachineInstance<C> implements StateMachineInstance<C> {
                 .filter(s -> s.getResult().isFailed()).count();
 
         eventBus.publish(new MachineEvent.MachineFailedEvent<>(
-                executionId, definition.id(), stateName, subStepName, (int) failCount,
-                disposition));
+                executionId, definition.id(), ctx, stateName, subStepName, (int) failCount,
+                disposition, failure));
 
         if (disposition == FailureDisposition.REWIND) {
-            rewindTo(sourceStateName, stateName, subStepName, runResult, pendingEvent);
+            rewindTo(sourceStateName, stateName, subStepName, runResult, pendingEvent, failure);
             return;
         }
 
@@ -379,11 +391,7 @@ public class DefaultStateMachineInstance<C> implements StateMachineInstance<C> {
      */
     private FailureDisposition resolveDisposition(StateDefinition<C> state,
                                                   SubStepRunResult runResult,
-                                                  String pendingEvent,
-                                                  String sourceStateName) {
-        FailureContext<C> failure = buildFailureContext(
-                state, runResult, pendingEvent, sourceStateName);
-
+                                                  FailureContext<C> failure) {
         int index = runResult.getFailedSubStepIndex();
         FailurePolicy<C> subStepPolicy = index >= 0 && index < state.subSteps().size()
                 ? state.subSteps().get(index).failurePolicy()
@@ -451,12 +459,13 @@ public class DefaultStateMachineInstance<C> implements StateMachineInstance<C> {
      * never reset.
      */
     private void rewindTo(String sourceStateName, String failedStateName, String failedSubStepName,
-                          SubStepRunResult runResult, String pendingEvent) {
+                          SubStepRunResult runResult, String pendingEvent,
+                          FailureContext<C> failure) {
         executionRecord.rewindTo(sourceStateName, failedStateName);
         currentState = definition.stateByName(sourceStateName);
 
         if (snapshotRepository != null) {
-            ActionResult failure = runResult.getResult();
+            ActionResult failedResult = runResult.getResult();
             Instant now = Instant.now();
             snapshotRepository.save(executionId, new ExecutionSnapshot.Builder()
                     .executionId(executionId)
@@ -473,8 +482,8 @@ public class DefaultStateMachineInstance<C> implements StateMachineInstance<C> {
                                     (existing, replacement) -> replacement)))
                     .attemptNumber(attemptNumber + 1)
                     .lastFailedAt(now)
-                    .lastErrorMessage(failure != null ? failure.getErrorMessage() : null)
-                    .lastErrorType(failure != null ? failure.getErrorType() : null)
+                    .lastErrorMessage(failedResult != null ? failedResult.getErrorMessage() : null)
+                    .lastErrorType(failedResult != null ? failedResult.getErrorType() : null)
                     .failureDisposition(FailureDisposition.REWIND)
                     .status(SnapshotStatus.WAITING)
                     .capturedAt(now)
@@ -482,8 +491,8 @@ public class DefaultStateMachineInstance<C> implements StateMachineInstance<C> {
         }
 
         eventBus.publish(new MachineEvent.MachineRewoundEvent<>(
-                executionId, definition.id(), failedStateName, failedSubStepName,
-                sourceStateName, pendingEvent, attemptNumber + 1));
+                executionId, definition.id(), ctx, failedStateName, failedSubStepName,
+                sourceStateName, pendingEvent, attemptNumber + 1, failure));
     }
 
     private void runEntryHook(StateDefinition<C> state) {

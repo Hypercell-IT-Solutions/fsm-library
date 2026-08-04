@@ -5,9 +5,12 @@ import io.hypercell.fsm.core.StateMachineDefinition;
 import io.hypercell.fsm.core.StateMachineInstance;
 import io.hypercell.fsm.exception.ConcurrentRetryException;
 import io.hypercell.fsm.exception.RetryException;
+import io.hypercell.fsm.listener.InstanceOrigin;
 import io.hypercell.fsm.resume.ExecutionSnapshot;
 import io.hypercell.fsm.resume.SnapshotRepository;
 import io.hypercell.fsm.resume.SnapshotStatus;
+import io.hypercell.fsm.scope.ExecutionScope;
+import io.hypercell.fsm.scope.ExecutionScopeInfo;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -166,12 +169,17 @@ public class RetryCoordinator<C> {
         try {
             C ctx = contextLoader.load(executionId);
 
-            StateMachineInstance<C> resumed = definition.resume(ctx, snapshot, repository);
+            try (ExecutionScope scope = definition.executionScopeProvider()
+                    .open(new ExecutionScopeInfo<>(executionId, definition.id(),
+                            InstanceOrigin.RESUMED_FAILED, ctx))) {
 
-            resumed.proceed();
+                StateMachineInstance<C> resumed = definition.resume(ctx, snapshot, repository);
 
-            log.info("[RetryCoordinator] Retry succeeded for '{}'", executionId);
-            return resumed;
+                resumed.proceed();
+
+                log.info("[RetryCoordinator] Retry succeeded for '{}'", executionId);
+                return resumed;
+            }
 
         } catch (Exception e) {
             log.info("[RetryCoordinator] Retry failed for '{}': {}", executionId, e.getMessage());

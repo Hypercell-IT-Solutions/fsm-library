@@ -4,6 +4,7 @@ import io.hypercell.fsm.core.*;
 import io.hypercell.fsm.exception.InvalidStateException;
 import io.hypercell.fsm.failure.FailurePolicy;
 import io.hypercell.fsm.listener.EventBus;
+import io.hypercell.fsm.listener.InstanceOrigin;
 import io.hypercell.fsm.lock.ExecutionLockProvider;
 import io.hypercell.fsm.lock.ReentrantExecutionLockProvider;
 import io.hypercell.fsm.manager.StateMachineManager;
@@ -12,6 +13,8 @@ import io.hypercell.fsm.resume.ResumePolicy;
 import io.hypercell.fsm.resume.SnapshotRepository;
 import io.hypercell.fsm.resume.SnapshotStatus;
 import io.hypercell.fsm.retry.RetryCoordinator;
+import io.hypercell.fsm.scope.ExecutionScopeProvider;
+import io.hypercell.fsm.scope.NoOpExecutionScopeProvider;
 
 import java.util.Collections;
 import java.util.List;
@@ -42,6 +45,7 @@ public class DefaultStateMachineDefinition<C> implements StateMachineDefinition<
     private final int recoveryPageSize;
     private final ExecutionLockProvider lockProvider;
     private final FailurePolicy<C> failurePolicy;
+    private final ExecutionScopeProvider<C> executionScopeProvider;
 
     /**
      * Default recovery page size when none is configured on the builder.
@@ -63,7 +67,7 @@ public class DefaultStateMachineDefinition<C> implements StateMachineDefinition<
                                          ContextLoader<C> contextLoader) {
         this(id, initialState, states, transitions, resumePolicy, snapshotRepository,
                 retryCoordinator, eventBus, contextLoader, null, DEFAULT_RECOVERY_PAGE_SIZE,
-                null, null);
+                null, null, null);
     }
 
     /**
@@ -84,7 +88,8 @@ public class DefaultStateMachineDefinition<C> implements StateMachineDefinition<
                                          ExecutorService recoveryExecutor,
                                          int recoveryPageSize,
                                          ExecutionLockProvider lockProvider,
-                                         FailurePolicy<C> failurePolicy) {
+                                         FailurePolicy<C> failurePolicy,
+                                         ExecutionScopeProvider<C> executionScopeProvider) {
         this.id = id;
         this.initialState = initialState;
         this.states = Collections.unmodifiableMap(states);
@@ -98,6 +103,9 @@ public class DefaultStateMachineDefinition<C> implements StateMachineDefinition<
         this.recoveryPageSize = recoveryPageSize > 0 ? recoveryPageSize : DEFAULT_RECOVERY_PAGE_SIZE;
         this.lockProvider = lockProvider != null ? lockProvider : new ReentrantExecutionLockProvider();
         this.failurePolicy = failurePolicy;
+        this.executionScopeProvider = executionScopeProvider != null
+                ? executionScopeProvider
+                : NoOpExecutionScopeProvider.instance();
     }
 
     @Override
@@ -143,6 +151,11 @@ public class DefaultStateMachineDefinition<C> implements StateMachineDefinition<
     @Override
     public ExecutionLockProvider lockProvider() {
         return lockProvider;
+    }
+
+    @Override
+    public ExecutionScopeProvider<C> executionScopeProvider() {
+        return executionScopeProvider;
     }
 
     @Override
@@ -212,7 +225,8 @@ public class DefaultStateMachineDefinition<C> implements StateMachineDefinition<
         }
 
         return new DefaultStateMachineInstance<>(this, currentState, ctx, snapshot.getAttemptNumber(),
-                executionRecord, ExecutionStatus.RUNNING, repository, retryCoordinator, eventBus);
+                executionRecord, ExecutionStatus.RUNNING, repository, retryCoordinator, eventBus,
+                InstanceOrigin.RECONSTITUTED);
     }
 
     @Override
@@ -233,7 +247,7 @@ public class DefaultStateMachineDefinition<C> implements StateMachineDefinition<
         return new DefaultStateMachineInstance<>(
                 this, failedState, ctx, snapshot.getAttemptNumber(), hydratedRecord,
                 ExecutionStatus.FAILED, repository != null ? repository : snapshotRepository, retryCoordinator,
-                eventBus);
+                eventBus, InstanceOrigin.RESUMED_FAILED);
     }
 
     @Override
@@ -266,7 +280,8 @@ public class DefaultStateMachineDefinition<C> implements StateMachineDefinition<
 
         return new DefaultStateMachineInstance<>(
                 this, currentState, ctx, snapshot.getAttemptNumber(), executionRecord,
-                ExecutionStatus.RUNNING, effectiveRepo, retryCoordinator, eventBus);
+                ExecutionStatus.RUNNING, effectiveRepo, retryCoordinator, eventBus,
+                InstanceOrigin.RESUMED_INTERRUPTED);
     }
 
     private ExecutionRecord hydrateRecord(ExecutionSnapshot snapshot) {

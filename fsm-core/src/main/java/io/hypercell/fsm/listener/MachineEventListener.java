@@ -7,21 +7,27 @@ package io.hypercell.fsm.listener;
  * <p>
  * Option 1 — handle all events in one method (good for generic logging):
  * <pre>{@code
- * machine.addListener(event -> log(event));
+ * StateMachine.<OrderContext>define("orders")
+ *     .listener(event -> log(event))
  * }</pre>
  * Option 2 — override only the events you care about (good for specific reactions):
  * <pre>{@code
- * machine.addListener(new MachineEventListener<OrderContext>() {
- *     @Override
- *     public void onSubStepFailed(MachineEvent.SubStepFailedEvent<OrderContext> e) {
- *         alertOps("Payment step failed: " + e.getErrorMessage());
- *     }
- *     @Override
- *     public void onMachineCompleted(MachineEvent.MachineCompletedEvent<OrderContext> e) {
- *         metrics.increment("orders.completed");
- *     }
- * });
+ * StateMachine.<OrderContext>define("orders")
+ *     .listener(new MachineEventListener<OrderContext>() {
+ *         @Override
+ *         public void onSubStepFailed(MachineEvent.SubStepFailedEvent<OrderContext> e) {
+ *             alertOps("Payment step failed: " + e.getErrorMessage());
+ *         }
+ *         @Override
+ *         public void onMachineCompleted(MachineEvent.MachineCompletedEvent<OrderContext> e) {
+ *             metrics.increment("orders.completed");
+ *         }
+ *     })
  * }</pre>
+ * REGISTRATION:
+ * Listeners are registered on the builder only, via {@code .listener(...)}, and the set is frozen
+ * when {@code build()} runs. There is no way to add one to a machine after the fact.
+ * <p>
  * THREADING:
  * Listeners are called synchronously on the same thread as the machine execution.
  * Keep listeners fast — don't block inside them. If you need to do heavy work
@@ -40,7 +46,8 @@ public interface MachineEventListener<C> {
      * The default implementation delegates to the specific typed methods below.
      */
     default void onEvent(MachineEvent<C> event) {
-        if (event instanceof MachineEvent.TransitionFiredEvent<C> e) onTransitionFired(e);
+        if (event instanceof MachineEvent.InstanceCreatedEvent<C> e) onInstanceCreated(e);
+        else if (event instanceof MachineEvent.TransitionFiredEvent<C> e) onTransitionFired(e);
         else if (event instanceof MachineEvent.StateEnteredEvent<C> e) onStateEntered(e);
         else if (event instanceof MachineEvent.StateExitedEvent<C> e) onStateExited(e);
         else if (event instanceof MachineEvent.SubStepCompletedEvent<C> e) onSubStepCompleted(e);
@@ -52,19 +59,39 @@ public interface MachineEventListener<C> {
         else if (event instanceof MachineEvent.MachineRewoundEvent<C> e) onMachineRewound(e);
     }
 
-    /** Fired when a transition successfully moves the machine from one state to another. */
+    /**
+     * Fired the moment an instance is constructed, before any other event and before any state is
+     * entered or sub-step runs. The place to establish per-execution logging scope.
+     * <p>
+     * {@link MachineEvent.InstanceCreatedEvent#getOrigin()} distinguishes a fresh execution from
+     * the three recovery paths, which run on the {@code recoveryExecutor} rather than the caller's
+     * thread. If you set a thread-local here, note there is no matching teardown event — see
+     * {@link io.hypercell.fsm.scope.ExecutionScopeProvider} for a variant the library closes for you.
+     */
+    default void onInstanceCreated(MachineEvent.InstanceCreatedEvent<C> event) {
+    }
+
+    /**
+     * Fired when a transition successfully moves the machine from one state to another.
+     */
     default void onTransitionFired(MachineEvent.TransitionFiredEvent<C> event) {
     }
 
-    /** Fired after the machine enters a state and its {@code onEntry} hook completes. */
+    /**
+     * Fired after the machine enters a state and its {@code onEntry} hook completes.
+     */
     default void onStateEntered(MachineEvent.StateEnteredEvent<C> event) {
     }
 
-    /** Fired after the machine's {@code onExit} hook completes (before it moves). */
+    /**
+     * Fired after the machine's {@code onExit} hook completes (before it moves).
+     */
     default void onStateExited(MachineEvent.StateExitedEvent<C> event) {
     }
 
-    /** Fired when a sub-step executes and returns {@code SUCCESS}. */
+    /**
+     * Fired when a sub-step executes and returns {@code SUCCESS}.
+     */
     default void onSubStepCompleted(MachineEvent.SubStepCompletedEvent<C> event) {
     }
 

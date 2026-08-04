@@ -8,6 +8,8 @@ import io.hypercell.fsm.resume.ExecutionSnapshot;
 import io.hypercell.fsm.resume.ResumePolicy;
 import io.hypercell.fsm.resume.SnapshotRepository;
 import io.hypercell.fsm.retry.RetryCoordinator;
+import io.hypercell.fsm.scope.ExecutionScopeProvider;
+import io.hypercell.fsm.scope.NoOpExecutionScopeProvider;
 
 import java.util.List;
 import java.util.concurrent.ExecutorService;
@@ -128,6 +130,19 @@ public interface StateMachineDefinition<C> {
      */
     default ExecutionLockProvider lockProvider() {
         return new ReentrantExecutionLockProvider();
+    }
+
+    /**
+     * The {@link ExecutionScopeProvider} used to establish per-execution ambient state — MDC keys,
+     * a tracing span — around every unit of work.
+     * <p>
+     * Defaults to {@link NoOpExecutionScopeProvider}, so the library can call it unconditionally.
+     * Configure a real one on the builder via {@code .executionScopeProvider(...)}.
+     *
+     * @return the scope provider; never {@code null}
+     */
+    default ExecutionScopeProvider<C> executionScopeProvider() {
+        return NoOpExecutionScopeProvider.instance();
     }
 
     /**

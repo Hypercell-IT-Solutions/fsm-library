@@ -141,6 +141,30 @@ Consequences:
 - **Slow listeners slow down the machine.** Keep listeners fast. For heavy work (writing to a slow DB, calling an external API), publish to an async queue from the listener instead of doing the work inline.
 - **Listener exceptions are caught and logged per-listener.** One failing listener does not stop event dispatch to subsequent listeners, and does not fail the state machine operation.
 - **Listeners are not thread-safe by default.** If a listener instance is shared across machines, it must be thread-safe itself (because multiple machines may trigger concurrently from different threads).
+- **`event.getContext()` is the live domain object, not a copy.** Because dispatch is synchronous on the execution thread, a listener that mutates the context is mutating what the next sub-step is about to read. Treat it as read-only.
+
+---
+
+## Thread-locals and the MDC — use `ExecutionScopeProvider`
+
+`MachineEvent.InstanceCreatedEvent` fires before an execution does any work, which makes it a natural place to stamp a correlation ID into the SLF4J MDC. There is a trap in doing that directly.
+
+An instance has no single point of death, so there is no matching "destroyed" event to clear the MDC in. That is survivable on a request thread, where the container cleans up — but `recoverFailedExecutions(maxAttempts)` and `recoverInterruptedExecutions()` submit their work to the shared `recoveryExecutor`. A thread-local set on a pooled thread and never cleared **leaks into the next execution that thread picks up**, silently labelling one order's logs with another's correlation ID.
+
+Use `ExecutionScopeProvider` instead. The library opens the scope before the instance is built and closes it in a `finally`, so teardown is structural:
+
+```java
+.executionScopeProvider(info -> {
+    MDC.put("correlationId", info.context().getCorrelationId());
+    MDC.put("fsmOrigin", info.origin().name());   // NEW vs RESUMED_FAILED vs …
+    return () -> {
+        MDC.remove("correlationId");
+        MDC.remove("fsmOrigin");
+    };
+})
+```
+
+Scoped units of work: `trigger`, `proceed`, `initialize`, `resume`, each sweep retry, and each auto-retry fired by the `RetryCoordinator`. `ExecutionScope.close()` must not throw — log and swallow, so `finally` blocks stay clean.
 
 ---
 
