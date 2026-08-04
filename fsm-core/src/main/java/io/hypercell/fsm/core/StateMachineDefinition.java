@@ -1,5 +1,6 @@
 package io.hypercell.fsm.core;
 
+import io.hypercell.fsm.failure.FailurePolicy;
 import io.hypercell.fsm.lock.ExecutionLockProvider;
 import io.hypercell.fsm.lock.ReentrantExecutionLockProvider;
 import io.hypercell.fsm.manager.StateMachineManager;
@@ -128,6 +129,17 @@ public interface StateMachineDefinition<C> {
     default ExecutionLockProvider lockProvider() {
         return new ReentrantExecutionLockProvider();
     }
+
+    /**
+     * The machine-wide {@link FailurePolicy} — the last level consulted before the
+     * {@link io.hypercell.fsm.failure.FailureDisposition#RETRY} default.
+     * <p>
+     * Consulted only when neither the failing sub-step nor its state expressed an opinion.
+     * Returns {@code null} when no machine-level policy was configured, in which case every
+     * unclassified failure is treated as {@code RETRY} — the library's behaviour before
+     * dispositions existed.
+     */
+    FailurePolicy<C> failurePolicy();
 
     /**
      * Create a fresh instance starting at the initial state.

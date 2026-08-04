@@ -1,6 +1,7 @@
 package io.hypercell.fsm.manager;
 
 import io.hypercell.fsm.core.ExecutionStatus;
+import io.hypercell.fsm.failure.FailureDisposition;
 
 /**
  * The result of a {@link StateMachineManager#trigger(String, String)},
@@ -33,6 +34,12 @@ public final class ManagedTransitionResult<C> {
     private final Throwable rootCause;
 
     /**
+     * How the failure was classified. Non-null only when executionStatus == FAILED.
+     * Tells the caller whether recovery will happen on its own, needs a human, or is impossible.
+     */
+    private final FailureDisposition failureDisposition;
+
+    /**
      * The context object as it exists after execution completes.
      * Sub-steps may have mutated it during the run, so this reflects the final state.
      * <p>
@@ -49,6 +56,7 @@ public final class ManagedTransitionResult<C> {
         this.failedSubStepName = b.failedSubStepName;
         this.failedStateName = b.failedStateName;
         this.rootCause = b.rootCause;
+        this.failureDisposition = b.failureDisposition;
         this.context = b.context;
     }
 
@@ -113,6 +121,30 @@ public final class ManagedTransitionResult<C> {
     }
 
     /**
+     * How the failure was classified by the {@link io.hypercell.fsm.failure.FailurePolicy} chain;
+     * {@code null} unless {@link #getExecutionStatus()} is {@code FAILED}.
+     * <p>
+     * This is what an HTTP layer needs to pick a status code and a message, since it says what
+     * happens next without the caller having to reload the snapshot:
+     * <pre>{@code
+     * if (result.isFailed()) {
+     *     return switch (result.getFailureDisposition()) {
+     *         case RETRY  -> accepted("will retry automatically");
+     *         case MANUAL -> conflict("needs operator action");
+     *         case REWIND -> conflict("re-send the same request to try again");
+     *         case ABORT  -> unprocessable(result.getRootCause().getMessage());
+     *     };
+     * }
+     * }</pre>
+     * Note that for {@code REWIND} the execution has already been parked back at its source
+     * state, so {@link #getToState()} is that source state, not the state that failed —
+     * {@link #getFailedStateName()} still reports where the failure happened.
+     */
+    public FailureDisposition getFailureDisposition() {
+        return failureDisposition;
+    }
+
+    /**
      * The context object as it exists after execution completes.
      * Sub-steps may have mutated it, so this reflects the post-execution state —
      * no second DB load needed to build an HTTP response.
@@ -173,6 +205,7 @@ public final class ManagedTransitionResult<C> {
         private String failedSubStepName;
         private String failedStateName;
         private Throwable rootCause;
+        private FailureDisposition failureDisposition;
         private C context;
 
         public Builder<C> executionId(String v) {
@@ -207,6 +240,11 @@ public final class ManagedTransitionResult<C> {
 
         public Builder<C> rootCause(Throwable v) {
             rootCause = v;
+            return this;
+        }
+
+        public Builder<C> failureDisposition(FailureDisposition v) {
+            failureDisposition = v;
             return this;
         }
 

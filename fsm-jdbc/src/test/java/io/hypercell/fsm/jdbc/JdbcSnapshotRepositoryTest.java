@@ -1,6 +1,7 @@
 package io.hypercell.fsm.jdbc;
 
 import io.hypercell.fsm.core.ActionResult;
+import io.hypercell.fsm.failure.FailureDisposition;
 import io.hypercell.fsm.resume.ExecutionSnapshot;
 import io.hypercell.fsm.resume.SnapshotRepository;
 import io.hypercell.fsm.resume.SnapshotStatus;
@@ -38,6 +39,7 @@ class JdbcSnapshotRepositoryTest {
                 .attemptNumber(1)
                 .lastFailedAt(Instant.now())
                 .lastErrorMessage("connection timeout")
+                .lastErrorType("java.net.SocketTimeoutException")
                 .status(SnapshotStatus.FAILED)
                 .capturedAt(Instant.now())
                 .build();
@@ -285,6 +287,56 @@ class JdbcSnapshotRepositoryTest {
                 .containsExactlyInAnyOrder("failed-1", "failed-2");
         assertThat(result).allMatch(ExecutionSnapshot::isFailed);
         assertThat(result).allMatch(s -> s.getAttemptNumber() < 3);
+    }
+
+    @Test
+    void listFailed_excludesNonRetryDispositions() {
+        repo.save("retry-1", failedSnapshot("retry-1"));
+        repo.save("manual-1", failedSnapshot("manual-1")
+                .withFailureDisposition(FailureDisposition.MANUAL));
+        repo.save("abort-1", failedSnapshot("abort-1")
+                .withFailureDisposition(FailureDisposition.ABORT));
+
+        List<ExecutionSnapshot> result = repo.listFailed(10, null, 5);
+
+        assertThat(result).extracting(ExecutionSnapshot::getExecutionId)
+                .as("the sweep predicate filters on failure_disposition in SQL")
+                .containsExactly("retry-1");
+    }
+
+    @Test
+    void listFailed_keysetPage_alsoExcludesNonRetryDispositions() {
+        // The paginated branch is a separate SQL string; it must carry the same predicate.
+        repo.save("a-retry", failedSnapshot("a-retry"));
+        repo.save("b-manual", failedSnapshot("b-manual")
+                .withFailureDisposition(FailureDisposition.MANUAL));
+        repo.save("c-retry", failedSnapshot("c-retry"));
+
+        List<ExecutionSnapshot> result = repo.listFailed(10, "a-retry", 5);
+
+        assertThat(result).extracting(ExecutionSnapshot::getExecutionId)
+                .containsExactly("c-retry");
+    }
+
+    @Test
+    void failureClassification_roundTrips() {
+        repo.save("exec-cls", failedSnapshot("exec-cls")
+                .withFailureDisposition(FailureDisposition.ABORT));
+
+        assertThat(repo.load("exec-cls")).isPresent().hasValueSatisfying(loaded -> {
+            assertThat(loaded.getFailureDisposition()).isEqualTo(FailureDisposition.ABORT);
+            assertThat(loaded.isAutoRecoverable()).isFalse();
+            assertThat(loaded.getLastErrorMessage()).isEqualTo("connection timeout");
+            assertThat(loaded.getLastErrorType()).isEqualTo("java.net.SocketTimeoutException");
+        });
+    }
+
+    @Test
+    void failureDisposition_defaultsToRetry_whenNeverClassified() {
+        repo.save("exec-default", failedSnapshot("exec-default"));
+
+        assertThat(repo.load("exec-default")).isPresent().hasValueSatisfying(loaded ->
+                assertThat(loaded.getFailureDisposition()).isEqualTo(FailureDisposition.RETRY));
     }
 
     @Test

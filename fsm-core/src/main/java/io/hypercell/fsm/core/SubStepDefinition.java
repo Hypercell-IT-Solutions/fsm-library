@@ -1,5 +1,7 @@
 package io.hypercell.fsm.core;
 
+import io.hypercell.fsm.failure.FailurePolicy;
+
 /**
  * Defines a single named step within a state.
  * <p>
@@ -29,4 +31,12 @@ public interface SubStepDefinition<C> {
      * The actual work this sub-step performs.
      */
     Action<C> action();
+
+    /**
+     * The most specific {@link FailurePolicy} in the chain — consulted first when this sub-step
+     * fails, before the state's policy and the machine's policy.
+     *
+     * @return the policy, or {@code null} when this sub-step has no opinion of its own
+     */
+    FailurePolicy<C> failurePolicy();
 }

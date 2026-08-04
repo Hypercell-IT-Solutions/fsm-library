@@ -2,6 +2,7 @@ package io.hypercell.fsm.execution;
 
 import io.hypercell.fsm.core.*;
 import io.hypercell.fsm.exception.InvalidStateException;
+import io.hypercell.fsm.failure.FailurePolicy;
 import io.hypercell.fsm.listener.EventBus;
 import io.hypercell.fsm.lock.ExecutionLockProvider;
 import io.hypercell.fsm.lock.ReentrantExecutionLockProvider;
@@ -40,12 +41,17 @@ public class DefaultStateMachineDefinition<C> implements StateMachineDefinition<
     private final ExecutorService recoveryExecutor;
     private final int recoveryPageSize;
     private final ExecutionLockProvider lockProvider;
+    private final FailurePolicy<C> failurePolicy;
 
     /**
      * Default recovery page size when none is configured on the builder.
      */
     public static final int DEFAULT_RECOVERY_PAGE_SIZE = 100;
 
+    /**
+     * Convenience constructor for a definition with no recovery executor, default page size,
+     * default lock provider, and no machine-level failure policy.
+     */
     public DefaultStateMachineDefinition(String id,
                                          StateDefinition<C> initialState,
                                          Map<String, StateDefinition<C>> states,
@@ -56,38 +62,16 @@ public class DefaultStateMachineDefinition<C> implements StateMachineDefinition<
                                          EventBus<C> eventBus,
                                          ContextLoader<C> contextLoader) {
         this(id, initialState, states, transitions, resumePolicy, snapshotRepository,
-                retryCoordinator, eventBus, contextLoader, null, DEFAULT_RECOVERY_PAGE_SIZE);
+                retryCoordinator, eventBus, contextLoader, null, DEFAULT_RECOVERY_PAGE_SIZE,
+                null, null);
     }
 
-    public DefaultStateMachineDefinition(String id,
-                                         StateDefinition<C> initialState,
-                                         Map<String, StateDefinition<C>> states,
-                                         Map<String, List<TransitionDefinition<C>>> transitions,
-                                         ResumePolicy<C> resumePolicy,
-                                         SnapshotRepository snapshotRepository,
-                                         RetryCoordinator<C> retryCoordinator,
-                                         EventBus<C> eventBus,
-                                         ContextLoader<C> contextLoader,
-                                         ExecutorService recoveryExecutor) {
-        this(id, initialState, states, transitions, resumePolicy, snapshotRepository,
-                retryCoordinator, eventBus, contextLoader, recoveryExecutor, DEFAULT_RECOVERY_PAGE_SIZE);
-    }
-
-    public DefaultStateMachineDefinition(String id,
-                                         StateDefinition<C> initialState,
-                                         Map<String, StateDefinition<C>> states,
-                                         Map<String, List<TransitionDefinition<C>>> transitions,
-                                         ResumePolicy<C> resumePolicy,
-                                         SnapshotRepository snapshotRepository,
-                                         RetryCoordinator<C> retryCoordinator,
-                                         EventBus<C> eventBus,
-                                         ContextLoader<C> contextLoader,
-                                         ExecutorService recoveryExecutor,
-                                         int recoveryPageSize) {
-        this(id, initialState, states, transitions, resumePolicy, snapshotRepository,
-                retryCoordinator, eventBus, contextLoader, recoveryExecutor, recoveryPageSize, null);
-    }
-
+    /**
+     * Primary constructor. {@link io.hypercell.fsm.builder.StateMachineBuilder#build()} is the
+     * intended caller; construct directly only when assembling a definition by hand.
+     *
+     * @param failurePolicy the machine-wide failure policy, or {@code null} for none
+     */
     public DefaultStateMachineDefinition(String id,
                                          StateDefinition<C> initialState,
                                          Map<String, StateDefinition<C>> states,
@@ -99,7 +83,8 @@ public class DefaultStateMachineDefinition<C> implements StateMachineDefinition<
                                          ContextLoader<C> contextLoader,
                                          ExecutorService recoveryExecutor,
                                          int recoveryPageSize,
-                                         ExecutionLockProvider lockProvider) {
+                                         ExecutionLockProvider lockProvider,
+                                         FailurePolicy<C> failurePolicy) {
         this.id = id;
         this.initialState = initialState;
         this.states = Collections.unmodifiableMap(states);
@@ -112,6 +97,7 @@ public class DefaultStateMachineDefinition<C> implements StateMachineDefinition<
         this.recoveryExecutor = recoveryExecutor;
         this.recoveryPageSize = recoveryPageSize > 0 ? recoveryPageSize : DEFAULT_RECOVERY_PAGE_SIZE;
         this.lockProvider = lockProvider != null ? lockProvider : new ReentrantExecutionLockProvider();
+        this.failurePolicy = failurePolicy;
     }
 
     @Override
@@ -157,6 +143,11 @@ public class DefaultStateMachineDefinition<C> implements StateMachineDefinition<
     @Override
     public ExecutionLockProvider lockProvider() {
         return lockProvider;
+    }
+
+    @Override
+    public FailurePolicy<C> failurePolicy() {
+        return failurePolicy;
     }
 
     @Override

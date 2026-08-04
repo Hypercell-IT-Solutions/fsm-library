@@ -1,11 +1,8 @@
 package io.hypercell.fsm.builder;
 
-import io.hypercell.fsm.core.Action;
-import io.hypercell.fsm.core.Guard;
-import io.hypercell.fsm.core.StateHook;
-import io.hypercell.fsm.core.SubStepDefinition;
-import io.hypercell.fsm.core.SubStepHandler;
+import io.hypercell.fsm.core.*;
 import io.hypercell.fsm.exception.StateMachineConfigurationException;
+import io.hypercell.fsm.failure.FailurePolicy;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -36,6 +33,7 @@ public class StateBuilder<C> {
     private boolean terminal = false;
     private final List<SubStepDefinition<C>> subSteps = new ArrayList<>();
     private StateHook<C> compositeHook;
+    private FailurePolicy<C> failurePolicy;
     final List<Object[]> transitionData = new ArrayList<>();
 
     StateBuilder(StateMachineBuilder<C> parent, String name) {
@@ -93,11 +91,37 @@ public class StateBuilder<C> {
     }
 
     /**
+     * Set the failure policy for this state — consulted whenever one of its sub-steps fails and
+     * that sub-step had no policy of its own.
+     * <p>
+     * This is usually the right level to configure: the policy receives the failing sub-step's
+     * name and position in its {@link io.hypercell.fsm.failure.FailureContext}, so a single
+     * state-level policy can classify every sub-step of the state.
+     * <pre>{@code
+     * .state("PERFORM_SIM_SWAP")
+     *     .failurePolicy(FailurePolicy.onFirstSubStep(FailureDisposition.REWIND))
+     *     .subStep("reserve-msisdn", ctx -> reserve(ctx))   // fails → whole transition rewound
+     *     .subStep("activate-sim",   ctx -> activate(ctx))  // fails → normal retry from here
+     * }</pre>
+     * Returning {@code null} from the policy defers to the machine-level policy, and then to
+     * {@link io.hypercell.fsm.failure.FailureDisposition#RETRY}.
+     *
+     * @param policy the policy; must not be {@code null}
+     */
+    public StateBuilder<C> failurePolicy(FailurePolicy<C> policy) {
+        if (policy == null) throw new StateMachineConfigurationException(
+                "failurePolicy must not be null for state '" + name + "'.");
+        this.failurePolicy = policy;
+        return this;
+    }
+
+    /**
      * Register a sub-step from a handler class.
-     * Equivalent to: .subStep(handler.name(), handler::execute)
+     * Equivalent to: .subStep(handler.name(), handler::execute), also picking up the handler's
+     * {@link SubStepHandler#failurePolicy()} if it declares one.
      */
     public StateBuilder<C> subStep(SubStepHandler<C> handler) {
-        return subStep(handler.name(), handler::execute);
+        return subStep(handler.name(), handler::execute, handler.failurePolicy());
     }
 
     /**
@@ -112,13 +136,32 @@ public class StateBuilder<C> {
      * @throws StateMachineConfigurationException if the name is a duplicate or contains {@code ::}
      */
     public StateBuilder<C> subStep(String name, Action<C> action) {
+        return subStep(name, action, null);
+    }
+
+    /**
+     * Add a named sub-step with its own failure policy.
+     * <p>
+     * The sub-step policy is the most specific level of the chain — it is consulted before the
+     * state's and the machine's. Use this when one step inside a state needs recovery behaviour
+     * that the rest of the state does not share; otherwise prefer {@link #failurePolicy} at the
+     * state level.
+     *
+     * @param name   stable snapshot key — treat like a DB column name; renaming breaks
+     *               existing snapshots
+     * @param action the work to perform; may read and write the ctx
+     * @param policy the failure policy for this step; {@code null} means "no opinion", deferring
+     *               to the state policy
+     * @throws StateMachineConfigurationException if the name is a duplicate or contains {@code ::}
+     */
+    public StateBuilder<C> subStep(String name, Action<C> action, FailurePolicy<C> policy) {
         if (subSteps.stream().anyMatch(s -> s.name().equals(name)))
             throw new StateMachineConfigurationException(
                     "Duplicate sub-step '" + name + "' in state '" + this.name + "'.");
         if (name.contains("::"))
             throw new StateMachineConfigurationException(
                     "Sub-step name '" + name + "' contains reserved separator '::'.");
-        subSteps.add(new SimpleSubStep<>(name, action));
+        subSteps.add(new SimpleSubStep<>(name, action, policy));
         return this;
     }
 
@@ -173,7 +216,12 @@ public class StateBuilder<C> {
         return compositeHook;
     }
 
-    private record SimpleSubStep<C>(String n, Action<C> a) implements SubStepDefinition<C> {
+    FailurePolicy<C> getFailurePolicy() {
+        return failurePolicy;
+    }
+
+    private record SimpleSubStep<C>(String n, Action<C> a, FailurePolicy<C> p)
+            implements SubStepDefinition<C> {
         @Override
         public String name() {
             return n;
@@ -182,6 +230,11 @@ public class StateBuilder<C> {
         @Override
         public Action<C> action() {
             return a;
+        }
+
+        @Override
+        public FailurePolicy<C> failurePolicy() {
+            return p;
         }
     }
 }

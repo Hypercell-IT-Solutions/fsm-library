@@ -148,6 +148,48 @@ and needs retry tracking into a named sub-step instead.
 
 ---
 
+### 14. Failure dispositions cover sub-step failures only
+
+**Constraint:** [`FailurePolicy`](05-persistence-and-retry.md#failure-dispositions) is consulted for
+sub-step failures and nothing else, because a sub-step failure is the only kind that produces a
+persisted `FAILED` snapshot in the first place. Failures elsewhere still escape as exceptions with
+no snapshot written and therefore no disposition to classify:
+
+| Failure site | Behaviour |
+|---|---|
+| Sub-step throws / returns `FAILED` / returns `null` | `FAILED` snapshot, classified by `FailurePolicy` |
+| Transition action throws | `StateMachineException` propagates; **no snapshot written** |
+| `onEntry` / `onExit` hook throws | `StateMachineException` propagates; no snapshot (see #9) |
+| Guard throws | propagates |
+| `ContextLoader` throws | propagates |
+
+**Consequence:** a transition action that fails leaves no durable trace — the execution stays at its
+previous state with whatever snapshot it already had, and no recovery sweep will ever see it.
+
+**Workaround:** put work that can fail into a named sub-step of the target state rather than into a
+transition action or hook. Transition actions are best kept to pure in-memory routing decisions.
+
+**Fix:** write a snapshot on transition-action failure so those failures join the same recovery
+model. This is a behavioural change to the transition path and is deliberately out of scope for the
+disposition feature.
+
+---
+
+### 15. No compensation routing on failure
+
+**Constraint:** a `FailurePolicy` can decide how a failure is *recovered*, but it cannot redirect the
+machine to a different state — there is no `COMPENSATE(event)` disposition that fires a transition
+to, say, a `REVERT` state when a sub-step fails. Compensation must be driven by the caller reacting
+to the returned `ManagedTransitionResult`, or by an operator.
+
+**Why it is not implemented:** auto-firing a compensating transition raises its own design question —
+what happens when the compensating transition itself fails, and how deep the recursion is allowed to
+go — which deserves independent treatment rather than being bolted onto the disposition enum.
+
+**Extension point:** `FailureDisposition` is where such a mode would be added.
+
+---
+
 ## Minor issues
 
 ### 10. `fsm-core` pom declares Java 16 compiler target
@@ -219,5 +261,7 @@ remove `retryCoordinator()` from the `StateMachineDefinition` public interface a
 | Low | Java 16 compiler target in pom (#10) | Minor |
 | Future | Opt-in context serialization (#7) | Design |
 | Future | Sub-step timeouts (#8) | Design |
+| Future | Snapshot on transition-action failure (#14) | Design |
+| Future | Compensation routing on failure (#15) | Design |
 | Future | Spring Boot autoconfiguration (#12) | Architecture gap |
 | Future | `RetryCoordinator` visibility (#13) | Minor |

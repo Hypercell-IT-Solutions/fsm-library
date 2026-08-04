@@ -34,6 +34,7 @@ public class ExecutionRecord {
     private final List<StepRecord> steps = new ArrayList<>();
 
     private String currentStateName;
+    private String previousStateName;
     private String failedStateName;
     private String failedSubStepName;
     private String lastTriggerEvent;
@@ -61,6 +62,44 @@ public class ExecutionRecord {
 
     public void setCurrentStateName(String name) {
         this.currentStateName = name;
+    }
+
+    /**
+     * Move to a new state, remembering the one being left.
+     * <p>
+     * Called by {@code trigger()} as the transition commits. The remembered state is what a
+     * {@link io.hypercell.fsm.failure.FailureDisposition#REWIND} returns the execution to, so it
+     * is only meaningful within the transition that set it — it is deliberately not persisted.
+     * An execution rebuilt from a snapshot has no previous state until it triggers again.
+     */
+    public void moveTo(String name) {
+        this.previousStateName = this.currentStateName;
+        this.currentStateName = name;
+    }
+
+    /**
+     * The state this execution transitioned <em>from</em> to reach {@link #getCurrentStateName()},
+     * or {@code null} if no transition has fired on this instance.
+     */
+    public String getPreviousStateName() {
+        return previousStateName;
+    }
+
+    /**
+     * Rewind to {@code stateName}, discarding every step recorded for the state being abandoned.
+     * <p>
+     * The append-only rule is suspended here on purpose: a rewind means the abandoned state was
+     * never really entered, so leaving its step records behind would make the next attempt skip
+     * work that has to run again. Only the abandoned state's entries are dropped; earlier states
+     * keep their history.
+     *
+     * @param stateName      the state to return to
+     * @param abandonedState the state whose step records should be discarded
+     */
+    public void rewindTo(String stateName, String abandonedState) {
+        steps.removeIf(s -> s.getStateName().equals(abandonedState));
+        this.currentStateName = stateName;
+        this.previousStateName = null;
     }
 
     public void setStatus(ExecutionStatus status) {
@@ -94,6 +133,20 @@ public class ExecutionRecord {
                 .anyMatch(s -> s.getStateName().equals(stateName)
                         && s.getSubStepName().equals(subStepName)
                         && s.getResult().isSuccess());
+    }
+
+    /**
+     * True if any sub-step of the given state has committed — succeeded outright, or been
+     * skipped on a resume because it succeeded in an earlier attempt.
+     * <p>
+     * Both count as "work was done": a skipped step is the record of a side effect that already
+     * happened. This is what makes a {@link io.hypercell.fsm.failure.FailureDisposition#REWIND}
+     * unsafe, since rewinding would discard the evidence and re-run the step.
+     */
+    public boolean hasCommittedStepsFor(String stateName) {
+        return steps.stream()
+                .anyMatch(s -> s.getStateName().equals(stateName)
+                        && (s.getResult().isSuccess() || s.getResult().isSkipped()));
     }
 
     /**

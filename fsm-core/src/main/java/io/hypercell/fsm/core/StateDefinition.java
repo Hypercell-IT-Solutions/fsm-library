@@ -1,5 +1,7 @@
 package io.hypercell.fsm.core;
 
+import io.hypercell.fsm.failure.FailurePolicy;
+
 import java.util.List;
 import java.util.Optional;
 
@@ -43,4 +45,15 @@ public interface StateDefinition<C> {
      * Present if the builder called .onEntry() or .onExit() for this state.
      */
     Optional<StateHook<C>> hook();
+
+    /**
+     * The state-level {@link FailurePolicy}, consulted when a sub-step of this state fails and
+     * the sub-step itself had no opinion. Present if the builder called
+     * {@code .failurePolicy(...)} for this state.
+     * <p>
+     * This is where most policies live in practice: the policy receives the sub-step name in its
+     * {@link io.hypercell.fsm.failure.FailureContext}, so one state-level policy can classify
+     * every sub-step of the state.
+     */
+    Optional<FailurePolicy<C>> failurePolicy();
 }

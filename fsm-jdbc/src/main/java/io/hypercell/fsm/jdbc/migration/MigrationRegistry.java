@@ -22,6 +22,8 @@ import java.util.List;
  *       to accelerate the {@code recoverFailedExecutions} sweep query.</li>
  *   <li>V3 — {@code create_execution_locks}: the {@code fsm_execution_locks} table for
  *       distributed per-execution locking via {@code JdbcExecutionLockProvider}.</li>
+ *   <li>V4 — {@code add_failure_disposition}: the {@code failure_disposition} and
+ *       {@code last_error_type} columns plus the sweep index.</li>
  * </ol>
  */
 public final class MigrationRegistry {
@@ -49,10 +51,23 @@ public final class MigrationRegistry {
     public static final Migration V3 = new Migration(3, "create_execution_locks");
 
     /**
+     * V4 — adds {@code failure_disposition} and {@code last_error_type} to {@code fsm_snapshots},
+     * plus the composite index {@code (status, failure_disposition, attempt_number)} covering the
+     * {@link io.hypercell.fsm.manager.StateMachineManager#recoverFailedExecutions(int)} sweep.
+     * <p>
+     * {@code failure_disposition} carries the
+     * {@link io.hypercell.fsm.failure.FailureDisposition} decided by the
+     * {@link io.hypercell.fsm.failure.FailurePolicy} chain, and is what keeps non-retryable
+     * failures out of the sweep. It is {@code NOT NULL DEFAULT 'RETRY'}, so rows written before
+     * this version are backfilled with the library's previous behaviour.
+     */
+    public static final Migration V4 = new Migration(4, "add_failure_disposition");
+
+    /**
      * The complete ordered list of all registered migrations.
      * {@link SchemaMigrator} iterates this list in order to determine which versions to apply.
      */
-    public static final List<Migration> ALL = List.of(V1, V2, V3);
+    public static final List<Migration> ALL = List.of(V1, V2, V3, V4);
 
     private MigrationRegistry() {
     }

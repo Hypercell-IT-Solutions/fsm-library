@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.hypercell.fsm.core.ActionResult;
 import io.hypercell.fsm.exception.SnapshotException;
+import io.hypercell.fsm.failure.FailureDisposition;
 import io.hypercell.fsm.jdbc.migration.MigrationMode;
 import io.hypercell.fsm.jdbc.migration.SchemaMigrator;
 import io.hypercell.fsm.resume.ExecutionSnapshot;
@@ -72,7 +73,8 @@ public class JdbcSnapshotRepository implements SnapshotRepository {
     private static final String SELECT_COLUMNS = """
             execution_id, machine_definition_id, current_state_name, failed_state_name,
             failed_sub_step_name, last_trigger_event, attempt_number, last_failed_at,
-            scheduled_retry_at, last_error_message, status, captured_at, completed_steps
+            scheduled_retry_at, last_error_message, last_error_type, failure_disposition,
+            status, captured_at, completed_steps
             """;
 
     private final DataSource dataSource;
@@ -230,12 +232,14 @@ public class JdbcSnapshotRepository implements SnapshotRepository {
         String sql;
         if (afterExecutionId == null) {
             sql = "SELECT " + SELECT_COLUMNS + " FROM " + DEFAULT_TABLE
-                    + " WHERE status = 'FAILED' AND attempt_number < ?"
+                    + " WHERE status = 'FAILED' AND failure_disposition = 'RETRY'"
+                    + " AND attempt_number < ?"
                     + " ORDER BY execution_id"
                     + " " + limitClause;
         } else {
             sql = "SELECT " + SELECT_COLUMNS + " FROM " + DEFAULT_TABLE
-                    + " WHERE status = 'FAILED' AND attempt_number < ? AND execution_id > ?"
+                    + " WHERE status = 'FAILED' AND failure_disposition = 'RETRY'"
+                    + " AND attempt_number < ? AND execution_id > ?"
                     + " ORDER BY execution_id"
                     + " " + limitClause;
         }
@@ -268,9 +272,11 @@ public class JdbcSnapshotRepository implements SnapshotRepository {
         ps.setString(8, s.getLastFailedAt() != null ? s.getLastFailedAt().toString() : null);
         ps.setString(9, s.getScheduledRetryAt() != null ? s.getScheduledRetryAt().toString() : null);
         ps.setString(10, s.getLastErrorMessage());
-        ps.setString(11, s.getStatus().name());
-        ps.setString(12, s.getCapturedAt().toString());
-        ps.setString(13, serializeSteps(s.getCompletedSubStepResults()));
+        ps.setString(11, s.getLastErrorType());
+        ps.setString(12, s.getFailureDisposition().name());
+        ps.setString(13, s.getStatus().name());
+        ps.setString(14, s.getCapturedAt().toString());
+        ps.setString(15, serializeSteps(s.getCompletedSubStepResults()));
     }
 
     private static ExecutionSnapshot toSnapshot(ResultSet rs) throws SQLException {
@@ -285,6 +291,8 @@ public class JdbcSnapshotRepository implements SnapshotRepository {
                 .lastFailedAt(parseInstant(rs.getString("last_failed_at")))
                 .scheduledRetryAt(parseInstant(rs.getString("scheduled_retry_at")))
                 .lastErrorMessage(rs.getString("last_error_message"))
+                .lastErrorType(rs.getString("last_error_type"))
+                .failureDisposition(parseDisposition(rs.getString("failure_disposition")))
                 .status(SnapshotStatus.valueOf(rs.getString("status")))
                 .capturedAt(parseInstant(rs.getString("captured_at")))
                 .completedSubStepResults(deserializeSteps(rs.getString("completed_steps")))
@@ -352,6 +360,25 @@ public class JdbcSnapshotRepository implements SnapshotRepository {
             return Instant.parse(s);
         } catch (Exception e) {
             return null;
+        }
+    }
+
+    /**
+     * Read the {@code failure_disposition} column, tolerating anything unexpected.
+     * <p>
+     * The column is {@code NOT NULL DEFAULT 'RETRY'}, so in practice a value is always present.
+     * An unreadable one — a row written by a newer version of the library that added a
+     * disposition this one does not know — falls back to {@code RETRY} rather than failing the
+     * whole query, since {@code RETRY} is the behaviour the library had before dispositions and
+     * is the safe reading of "we don't know".
+     */
+    private static FailureDisposition parseDisposition(String s) {
+        if (s == null || s.isBlank()) return FailureDisposition.RETRY;
+        try {
+            return FailureDisposition.valueOf(s);
+        } catch (IllegalArgumentException e) {
+            log.warn("[JdbcSnapshotRepository] Unknown failure_disposition '{}'; treating as RETRY", s);
+            return FailureDisposition.RETRY;
         }
     }
 }

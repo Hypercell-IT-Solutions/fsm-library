@@ -64,15 +64,17 @@ class SqlDialectTest {
     }
 
     @Test
-    void upsertSql_uses13PositionalParameters() {
+    void upsertSql_uses15PositionalParameters() {
+        // One placeholder per bound column in JdbcSnapshotRepository.bind(), which must agree
+        // with every dialect's upsert. V4 added last_error_type and failure_disposition.
         for (SqlDialect dialect : List.of(
                 new H2Dialect(), new PostgreSqlDialect(), new MySqlDialect(),
                 new SqliteDialect(), new OracleDialect())) {
             String sql = dialect.upsertSql("fsm_snapshots");
             long count = sql.chars().filter(c -> c == '?').count();
             assertThat(count)
-                    .as("Dialect %s should have 13 placeholders, got %d", dialect.getClass().getSimpleName(), count)
-                    .isEqualTo(13);
+                    .as("Dialect %s should have 15 placeholders, got %d", dialect.getClass().getSimpleName(), count)
+                    .isEqualTo(15);
         }
     }
 }

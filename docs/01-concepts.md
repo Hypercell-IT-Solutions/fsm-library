@@ -104,6 +104,8 @@ This means even complex multi-step operations are safe to retry without double-c
 
 > **Naming is a contract.** Treat sub-step names like database column names. Renaming a sub-step breaks any snapshot saved under the old name.
 
+Sub-steps are also the unit at which failures are **classified** — see [failure dispositions](#failure-dispositions) below.
+
 ### Context mutations and resume
 
 Skipping a sub-step means its **code does not run again** — including any in-memory mutations it made to the context. On resume, the library calls `contextLoader(executionId)` to load a **fresh context**. A fresh context does not carry the in-memory changes made by skipped steps.
@@ -220,11 +222,43 @@ A **snapshot** is a serializable point-in-time capture saved when the machine fa
 - Which sub-step failed
 - Which sub-steps **completed** (keyed as `"stateName::subStepName"`)
 - The attempt number and error details
+- The **failure disposition** — how this failure should be handled
 - A scheduled retry time (if an auto-retry is pending)
 
 Snapshots are stored in a `SnapshotRepository`. The library uses the `executionId` as the storage key.
 
 See [Persistence & retry](05-persistence-and-retry.md) for the full picture.
+
+---
+
+## Failure dispositions
+
+A snapshot's `SnapshotStatus` says *where* an execution is at rest. Its **failure disposition** says
+*how* the failure should be handled — a separate question, because two executions can both be
+`FAILED` and still need completely different recovery.
+
+By default every sub-step failure is `RETRY`: save a snapshot, and let the recovery sweep retry it
+from the failure point. A `FailurePolicy` can classify a failure differently at the moment it
+happens, based on which state, which sub-step, and which exception:
+
+| Disposition | What it means |
+|---|---|
+| `RETRY` | Transient — retry from the failure point. The default. |
+| `MANUAL` | Stays `FAILED` and resumable, but no automatic recovery touches it. |
+| `REWIND` | Nothing was committed — abandon the transition and park back at the source state, so the caller can re-fire the same event. |
+| `ABORT` | Permanent. Retrying cannot help; `proceed()` refuses it. |
+
+Policies attach at machine, state, or sub-step level, most specific wins:
+
+```java
+.state("PROCESSING")
+    .failurePolicy(FailurePolicy.onFirstSubStep(FailureDisposition.REWIND))
+    .subStep("reserve-stock",  ctx -> reserve(ctx))   // fails → transition rewound
+    .subStep("charge-payment", ctx -> charge(ctx))    // fails → normal retry
+```
+
+See [Failure dispositions](05-persistence-and-retry.md#failure-dispositions) for the full rules,
+including the safety constraints on `REWIND`.
 
 ---
 

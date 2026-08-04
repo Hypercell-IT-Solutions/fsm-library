@@ -58,7 +58,8 @@ public class InMemorySnapshotRepository implements SnapshotRepository {
     @Override
     public List<ExecutionSnapshot> listFailed(int limit, String afterExecutionId, int maxAttempts) {
         return store.values().stream()
-                .filter(s -> s.isFailed() && s.getAttemptNumber() < maxAttempts)
+                .filter(s -> s.isFailed() && s.isAutoRecoverable()
+                        && s.getAttemptNumber() < maxAttempts)
                 .sorted(Comparator.comparing(ExecutionSnapshot::getExecutionId))
                 .filter(s -> afterExecutionId == null
                         || s.getExecutionId().compareTo(afterExecutionId) > 0)

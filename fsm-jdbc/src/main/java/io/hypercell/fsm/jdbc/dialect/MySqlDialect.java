@@ -19,8 +19,9 @@ public class MySqlDialect implements SqlDialect {
                 INSERT INTO %s (
                     execution_id, machine_definition_id, current_state_name, failed_state_name,
                     failed_sub_step_name, last_trigger_event, attempt_number, last_failed_at,
-                    scheduled_retry_at, last_error_message, status, captured_at, completed_steps, version
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                    scheduled_retry_at, last_error_message, last_error_type, failure_disposition,
+                    status, captured_at, completed_steps, version
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
                 ON DUPLICATE KEY UPDATE
                     machine_definition_id = VALUES(machine_definition_id),
                     current_state_name    = VALUES(current_state_name),
@@ -31,6 +32,8 @@ public class MySqlDialect implements SqlDialect {
                     last_failed_at        = VALUES(last_failed_at),
                     scheduled_retry_at    = VALUES(scheduled_retry_at),
                     last_error_message    = VALUES(last_error_message),
+                    last_error_type       = VALUES(last_error_type),
+                    failure_disposition   = VALUES(failure_disposition),
                     status                = VALUES(status),
                     captured_at           = VALUES(captured_at),
                     completed_steps       = VALUES(completed_steps),

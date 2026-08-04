@@ -48,7 +48,7 @@ class SchemaMigratorTest {
 
         migrator.migrate();
 
-        assertThat(historyVersions(ds)).containsExactly(1, 2, 3);
+        assertThat(historyVersions(ds)).containsExactly(1, 2, 3, 4);
         assertThat(tableExists(ds, "fsm_snapshots")).isTrue();
         assertThat(tableExists(ds, "fsm_execution_locks")).isTrue();
     }
@@ -58,7 +58,7 @@ class SchemaMigratorTest {
         DataSource ds = newDs();
         migrator(ds).migrate();
 
-        assertThat(historyVersions(ds)).containsExactly(1, 2, 3);
+        assertThat(historyVersions(ds)).containsExactly(1, 2, 3, 4);
 
         boolean indexFound = false;
         try (Connection conn = ds.getConnection();
@@ -82,7 +82,7 @@ class SchemaMigratorTest {
         migrator.migrate();
         migrator.migrate();
 
-        assertThat(historyVersions(ds)).containsExactly(1, 2, 3);
+        assertThat(historyVersions(ds)).containsExactly(1, 2, 3, 4);
     }
 
     @Test

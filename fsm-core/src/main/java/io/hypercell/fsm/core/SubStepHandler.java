@@ -1,5 +1,7 @@
 package io.hypercell.fsm.core;
 
+import io.hypercell.fsm.failure.FailurePolicy;
+
 /**
  * A named sub-step that can be implemented as a standalone class.
  * <p>
@@ -37,5 +39,22 @@ public interface SubStepHandler<C> {
      */
     default Action<C> asAction() {
         return this::execute;
+    }
+
+    /**
+     * How failures of this sub-step should be handled.
+     * <p>
+     * Override to give this specific step its own recovery behaviour — it is the most specific
+     * level of the policy chain and wins over the state's and machine's policies. Returning
+     * {@code null} (the default) means "no opinion": the state policy is consulted next.
+     * <pre>{@code
+     * @Override
+     * public FailurePolicy<SimSwapHelper> failurePolicy() {
+     *     return FailurePolicy.always(FailureDisposition.REWIND);
+     * }
+     * }</pre>
+     */
+    default FailurePolicy<C> failurePolicy() {
+        return null;
     }
 }

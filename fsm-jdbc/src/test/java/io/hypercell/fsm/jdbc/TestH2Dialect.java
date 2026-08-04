@@ -17,8 +17,9 @@ class TestH2Dialect implements SqlDialect {
         return "MERGE INTO " + tableName
                 + " (execution_id, machine_definition_id, current_state_name, failed_state_name,"
                 + " failed_sub_step_name, last_trigger_event, attempt_number, last_failed_at,"
-                + " scheduled_retry_at, last_error_message, status, captured_at, completed_steps, version)"
+                + " scheduled_retry_at, last_error_message, last_error_type, failure_disposition,"
+                + " status, captured_at, completed_steps, version)"
                 + " KEY (execution_id)"
-                + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)";
+                + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)";
     }
 }

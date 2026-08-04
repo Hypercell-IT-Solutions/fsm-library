@@ -33,6 +33,8 @@ public class OracleDialect implements SqlDialect {
                         ? AS last_failed_at,
                         ? AS scheduled_retry_at,
                         ? AS last_error_message,
+                        ? AS last_error_type,
+                        ? AS failure_disposition,
                         ? AS status,
                         ? AS captured_at,
                         ? AS completed_steps
@@ -48,6 +50,8 @@ public class OracleDialect implements SqlDialect {
                     t.last_failed_at        = s.last_failed_at,
                     t.scheduled_retry_at    = s.scheduled_retry_at,
                     t.last_error_message    = s.last_error_message,
+                    t.last_error_type       = s.last_error_type,
+                    t.failure_disposition   = s.failure_disposition,
                     t.status                = s.status,
                     t.captured_at           = s.captured_at,
                     t.completed_steps       = s.completed_steps,
@@ -55,11 +59,13 @@ public class OracleDialect implements SqlDialect {
                 WHEN NOT MATCHED THEN INSERT (
                     execution_id, machine_definition_id, current_state_name, failed_state_name,
                     failed_sub_step_name, last_trigger_event, attempt_number, last_failed_at,
-                    scheduled_retry_at, last_error_message, status, captured_at, completed_steps, version
+                    scheduled_retry_at, last_error_message, last_error_type, failure_disposition,
+                    status, captured_at, completed_steps, version
                 ) VALUES (
                     s.execution_id, s.machine_definition_id, s.current_state_name, s.failed_state_name,
                     s.failed_sub_step_name, s.last_trigger_event, s.attempt_number, s.last_failed_at,
-                    s.scheduled_retry_at, s.last_error_message, s.status, s.captured_at, s.completed_steps, 1
+                    s.scheduled_retry_at, s.last_error_message, s.last_error_type, s.failure_disposition,
+                    s.status, s.captured_at, s.completed_steps, 1
                 )
                 """, tableName);
     }
