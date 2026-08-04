@@ -30,13 +30,27 @@ public enum TriggerEligibility {
     READY,
 
     /**
-     * The execution has a {@code FAILED} or {@code RETRY_SCHEDULED} snapshot.
+     * The execution has a {@code FAILED} or {@code RETRY_SCHEDULED} snapshot whose failure is
+     * still recoverable — disposition {@link io.hypercell.fsm.failure.FailureDisposition#RETRY}
+     * or {@link io.hypercell.fsm.failure.FailureDisposition#MANUAL}.
      * <p>
      * Call {@link StateMachineManager#proceed(String)} to retry the failed sub-steps first.
      * Once {@code proceed()} succeeds and the snapshot transitions to {@code WAITING}, the
      * execution will be {@code READY} for a new {@code trigger()} call.
      */
     NEEDS_PROCEED,
+
+    /**
+     * The execution failed with disposition
+     * {@link io.hypercell.fsm.failure.FailureDisposition#ABORT} — a permanent failure that
+     * retrying cannot fix.
+     * <p>
+     * Neither {@code trigger()} nor {@code proceed()} will succeed; the latter throws
+     * {@link io.hypercell.fsm.exception.ExecutionAbortedException}. The snapshot is kept for
+     * auditing. To move on, correct the underlying problem and start a new execution, calling
+     * {@code repository.delete(executionId)} first if you want to reuse the same ID.
+     */
+    ABORTED,
 
     /**
      * The execution has a {@code RUNNING} snapshot — the process crashed mid-transition.

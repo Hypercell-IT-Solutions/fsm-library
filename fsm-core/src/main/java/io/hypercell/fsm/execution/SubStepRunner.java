@@ -7,6 +7,8 @@ import io.hypercell.fsm.listener.EventBus;
 import io.hypercell.fsm.listener.MachineEvent;
 import io.hypercell.fsm.resume.ResumePolicy;
 
+import java.util.List;
+
 /**
  * Executes the sub-steps of a state sequentially.
  * <p>
@@ -51,7 +53,9 @@ public class SubStepRunner<C> {
     public SubStepRunResult run(StateDefinition<C> state, C ctx, ExecutionRecord executionRecord,
                                 Runnable onStepCommitted) {
 
-        for (SubStepDefinition<C> subStep : state.subSteps()) {
+        List<SubStepDefinition<C>> subSteps = state.subSteps();
+        for (int index = 0; index < subSteps.size(); index++) {
+            SubStepDefinition<C> subStep = subSteps.get(index);
 
             if (resumePolicy.shouldSkip(state, subStep, executionRecord)) {
                 ActionResult stored = resumePolicy
@@ -83,8 +87,7 @@ public class SubStepRunner<C> {
                         state.name(), subStep.name(),
                         result.getErrorMessage(), result.getErrorType()));
 
-                return SubStepRunResult.failed(subStep.name(),
-                        new RuntimeException(result.getErrorMessage()));
+                return SubStepRunResult.failed(subStep.name(), index, causeOf(result), result);
             }
 
             onStepCommitted.run();
@@ -94,5 +97,19 @@ public class SubStepRunner<C> {
         }
 
         return SubStepRunResult.completed();
+    }
+
+    /**
+     * The throwable to propagate for a failed result.
+     * <p>
+     * When the sub-step threw, the original exception is carried through untouched — its type is
+     * what {@link io.hypercell.fsm.failure.FailurePolicy} and
+     * {@link io.hypercell.fsm.retry.RetryPolicy} branch on, and wrapping it here would erase that.
+     * When the sub-step reported failure by returning {@code ActionResult.failed(message)} there
+     * is no exception to carry, so a synthetic one stands in to keep the failure path uniform.
+     */
+    private static Throwable causeOf(ActionResult result) {
+        Throwable cause = result.getCause();
+        return cause != null ? cause : new RuntimeException(result.getErrorMessage());
     }
 }

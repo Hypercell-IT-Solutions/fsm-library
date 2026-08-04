@@ -19,8 +19,9 @@ public class SqliteDialect implements SqlDialect {
                 INSERT INTO %1$s (
                     execution_id, machine_definition_id, current_state_name, failed_state_name,
                     failed_sub_step_name, last_trigger_event, attempt_number, last_failed_at,
-                    scheduled_retry_at, last_error_message, status, captured_at, completed_steps, version
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                    scheduled_retry_at, last_error_message, last_error_type, failure_disposition,
+                    status, captured_at, completed_steps, version
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
                 ON CONFLICT(execution_id) DO UPDATE SET
                     machine_definition_id = excluded.machine_definition_id,
                     current_state_name    = excluded.current_state_name,
@@ -31,6 +32,8 @@ public class SqliteDialect implements SqlDialect {
                     last_failed_at        = excluded.last_failed_at,
                     scheduled_retry_at    = excluded.scheduled_retry_at,
                     last_error_message    = excluded.last_error_message,
+                    last_error_type       = excluded.last_error_type,
+                    failure_disposition   = excluded.failure_disposition,
                     status                = excluded.status,
                     captured_at           = excluded.captured_at,
                     completed_steps       = excluded.completed_steps,

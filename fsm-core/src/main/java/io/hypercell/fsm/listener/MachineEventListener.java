@@ -49,6 +49,7 @@ public interface MachineEventListener<C> {
         else if (event instanceof MachineEvent.MachineCompletedEvent<C> e) onMachineCompleted(e);
         else if (event instanceof MachineEvent.MachineFailedEvent<C> e) onMachineFailed(e);
         else if (event instanceof MachineEvent.MachineResumedEvent<C> e) onMachineResumed(e);
+        else if (event instanceof MachineEvent.MachineRewoundEvent<C> e) onMachineRewound(e);
     }
 
     /** Fired when a transition successfully moves the machine from one state to another. */
@@ -101,5 +102,15 @@ public interface MachineEventListener<C> {
      * Carries the state and sub-step name the resume will re-run from.
      */
     default void onMachineResumed(MachineEvent.MachineResumedEvent<C> event) {
+    }
+
+    /**
+     * Fired when a failure was classified {@link io.hypercell.fsm.failure.FailureDisposition#REWIND}
+     * and the in-flight transition was abandoned — the execution is parked back at its source
+     * state and can be re-triggered.
+     * <p>
+     * Always preceded by an {@link #onMachineFailed} carrying the same disposition.
+     */
+    default void onMachineRewound(MachineEvent.MachineRewoundEvent<C> event) {
     }
 }

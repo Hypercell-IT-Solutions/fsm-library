@@ -3,6 +3,7 @@ package io.hypercell.fsm.builder;
 import io.hypercell.fsm.core.*;
 import io.hypercell.fsm.exception.StateMachineConfigurationException;
 import io.hypercell.fsm.execution.DefaultStateMachineDefinition;
+import io.hypercell.fsm.failure.FailurePolicy;
 import io.hypercell.fsm.listener.EventBus;
 import io.hypercell.fsm.listener.MachineEventListener;
 import io.hypercell.fsm.lock.ExecutionLockProvider;
@@ -56,6 +57,7 @@ public class StateMachineBuilder<C> {
     private ExecutorService recoveryExecutor = null;
     private int recoveryPageSize = DefaultStateMachineDefinition.DEFAULT_RECOVERY_PAGE_SIZE;
     private ExecutionLockProvider executionLockProvider = new ReentrantExecutionLockProvider();
+    private FailurePolicy<C> failurePolicy = null;
 
     public StateMachineBuilder(String id) {
         this.id = id;
@@ -187,6 +189,28 @@ public class StateMachineBuilder<C> {
     }
 
     /**
+     * Set the machine-wide failure policy — the last level consulted before the
+     * {@link io.hypercell.fsm.failure.FailureDisposition#RETRY} default.
+     * <p>
+     * Use this for rules that hold across every state, typically keyed on exception type:
+     * <pre>{@code
+     * .failurePolicy(FailurePolicy.onErrorType(IllegalArgumentException.class,
+     *                                          FailureDisposition.ABORT))
+     * }</pre>
+     * State-level and sub-step-level policies are consulted first and win. When unset — or when
+     * every level defers — failures are treated as {@code RETRY}, which is the library's
+     * behaviour before dispositions existed.
+     *
+     * @param policy the policy; must not be {@code null}
+     */
+    public StateMachineBuilder<C> failurePolicy(FailurePolicy<C> policy) {
+        if (policy == null) throw new StateMachineConfigurationException(
+                "failurePolicy must not be null.");
+        failurePolicy = policy;
+        return this;
+    }
+
+    /**
      * Register an event listener. Multiple calls add multiple listeners;
      * events are dispatched in registration order.
      */
@@ -247,7 +271,8 @@ public class StateMachineBuilder<C> {
         Map<String, StateDefinition<C>> stateMap = new LinkedHashMap<>();
         for (StateBuilder<C> sb : stateBuilders) {
             stateMap.put(sb.getName(), new SimpleStateDef<>(
-                    sb.getName(), sb.isTerminal(), sb.getSubSteps(), sb.getCompositeHook()));
+                    sb.getName(), sb.isTerminal(), sb.getSubSteps(), sb.getCompositeHook(),
+                    sb.getFailurePolicy()));
         }
 
         Map<String, List<TransitionDefinition<C>>> transitionMap = new LinkedHashMap<>();
@@ -278,7 +303,7 @@ public class StateMachineBuilder<C> {
         DefaultStateMachineDefinition<C> def = new DefaultStateMachineDefinition<>(
                 id, stateMap.get(initialStateName), stateMap, transitionMap,
                 resumePolicy, snapshotRepository, coordinator, bus, contextLoader, recoveryExecutor,
-                recoveryPageSize, executionLockProvider);
+                recoveryPageSize, executionLockProvider, failurePolicy);
         ref.set(def);
         return def;
     }
@@ -356,6 +381,11 @@ public class StateMachineBuilder<C> {
         }
 
         @Override
+        public FailurePolicy<C> failurePolicy() {
+            return d.failurePolicy();
+        }
+
+        @Override
         public StateMachineInstance<C> newInstance(C c) {
             return d.newInstance(c);
         }
@@ -401,12 +431,15 @@ public class StateMachineBuilder<C> {
         private final boolean t;
         private final List<SubStepDefinition<C>> s;
         private final StateHook<C> h;
+        private final FailurePolicy<C> fp;
 
-        SimpleStateDef(String n, boolean t, List<SubStepDefinition<C>> s, StateHook<C> h) {
+        SimpleStateDef(String n, boolean t, List<SubStepDefinition<C>> s, StateHook<C> h,
+                       FailurePolicy<C> fp) {
             this.n = n;
             this.t = t;
             this.s = Collections.unmodifiableList(s);
             this.h = h;
+            this.fp = fp;
         }
 
         @Override
@@ -427,6 +460,11 @@ public class StateMachineBuilder<C> {
         @Override
         public Optional<StateHook<C>> hook() {
             return Optional.ofNullable(h);
+        }
+
+        @Override
+        public Optional<FailurePolicy<C>> failurePolicy() {
+            return Optional.ofNullable(fp);
         }
     }
 

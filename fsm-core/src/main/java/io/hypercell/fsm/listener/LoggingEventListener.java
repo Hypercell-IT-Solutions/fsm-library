@@ -87,9 +87,16 @@ public class LoggingEventListener<C> implements MachineEventListener<C> {
 
     @Override
     public void onMachineFailed(MachineEvent.MachineFailedEvent<C> e) {
-        log("FAILED    ", String.format("%s | attempt %d | failed at '%s / %s'",
+        log("FAILED    ", String.format("%s | attempt %d | failed at '%s / %s' | %s",
                 e.getExecutionId(), e.getAttemptNumber(),
-                e.getStateName(), e.getSubStepName()), e);
+                e.getStateName(), e.getSubStepName(), e.getDisposition()), e);
+    }
+
+    @Override
+    public void onMachineRewound(MachineEvent.MachineRewoundEvent<C> e) {
+        log("REWOUND   ", String.format("%s / %s → parked at '%s' | re-fire '%s' | attempt %d",
+                e.getFailedStateName(), e.getFailedSubStepName(),
+                e.getRewoundToState(), e.getTriggerEvent(), e.getAttemptNumber()), e);
     }
 
     @Override

@@ -14,14 +14,16 @@ When a sub-step fails, the library saves an `ExecutionSnapshot` to the configure
 - `failedStateName` / `failedSubStepName` — the exact point of failure
 - `completedSubStepResults` — a map of sub-steps that already succeeded
 - `attemptNumber` — how many times we have tried (starts at 1)
-- `lastErrorMessage` / `lastErrorType` — error details for retry policy decisions
+- `lastErrorMessage` / `lastErrorType` — the durable record of *why* it failed
+- `failureDisposition` — *how* the failure should be handled (see [Failure dispositions](#failure-dispositions)); defaults to `RETRY`
 - `status` — the snapshot's own lifecycle status (see below)
 - `lastFailedAt` / `scheduledRetryAt` — timestamps
 
 ### What is NOT in the snapshot
 
 - **The context object** is never serialized. On resume, the library calls `contextLoader(executionId)` to load a fresh copy. Your context must be loadable by ID.
-- **Incomplete or failed sub-step results** — only successful results are stored. The failed step will be re-executed on resume.
+- **Incomplete or failed sub-step results** — only successful results are stored. The failed step will be re-executed on resume. The failure itself is not lost, though: its message and exception type are captured in `lastErrorMessage` / `lastErrorType`.
+- **The original exception object.** `ActionResult.getCause()` holds the live throwable so that `FailurePolicy` and `RetryPolicy` can branch on its real type, but it is never serialized — a result reloaded from a snapshot always has a `null` cause. Use `lastErrorType` for durable type information.
 
 ### Snapshot key
 
@@ -134,7 +136,7 @@ The snapshot has its own status, separate from `ExecutionStatus` (the live insta
 | `RUNNING` | Execution is **actively processing sub-steps**. A crash leaves the snapshot here. The startup sweep queries `WHERE status = 'RUNNING'` to find interrupted executions cheaply via the status index. |
 | `WAITING` | Sub-steps completed; machine is **parked at a non-terminal state** awaiting the next event. This is the normal at-rest status between two transitions. `listInterrupted()` never returns `WAITING` rows. |
 | `TERMINATED` | A terminal state was reached successfully. The snapshot is retained so that subsequent `trigger()` or `proceed()` calls correctly throw `CompletedMachineException`. Call `repository.delete(executionId)` to clean up. |
-| `FAILED` | A sub-step failed; waiting for manual or scheduled retry. |
+| `FAILED` | A sub-step failed; waiting for manual or scheduled retry. **How** it is recovered depends on its [failure disposition](#failure-dispositions). |
 | `RETRY_SCHEDULED` | An automatic retry has been scheduled. Do not call `manualRetry()` here; the scheduled retry will fire. Cancel it first if you must force an immediate retry. |
 
 Key rules:
@@ -143,6 +145,153 @@ Key rules:
 - **`WAITING`** — normal at-rest status; the machine is parked between transitions. These rows are NOT returned by `listInterrupted()`. This is the only non-absent state where `trigger()` succeeds.
 - **`FAILED`** — `trigger()` throws `IllegalTriggerStateException` — call `proceed()` first.
 - **`TERMINATED`** — execution finished. The snapshot is retained with this status so that subsequent `trigger()` or `proceed()` calls correctly throw `CompletedMachineException`. Call `repository.delete(executionId)` to clean up when you no longer need the record.
+
+---
+
+## Failure dispositions
+
+`SnapshotStatus` says *where* an execution is at rest. It does not say *how* a failure should be
+handled — and those are different questions. Two executions can both be `FAILED` and still need
+completely different recovery.
+
+By default every sub-step failure is treated identically: save a `FAILED` snapshot and let
+`recoverFailedExecutions(maxAttempts)` retry it from the failure point. That is right for transient
+failures and wrong for everything else. A `FailurePolicy` classifies a failure at the moment it
+happens, with knowledge of which state, which sub-step, and which exception, into one of four
+**dispositions**:
+
+| Disposition | Persisted status | Positioned at | Swept by `recoverFailedExecutions` | Auto-retry | `proceed()` | `trigger()` |
+|---|---|---|---|---|---|---|
+| `RETRY` (default) | `FAILED` / `RETRY_SCHEDULED` | failed state | yes | yes | yes | throws |
+| `MANUAL` | `FAILED` | failed state | **no** | **no** | yes | throws |
+| `REWIND` | `WAITING` | **source state** | no | no | no-op | **yes** |
+| `ABORT` | `FAILED` | failed state | no | no | throws `ExecutionAbortedException` | throws |
+
+- **`RETRY`** — the failure is transient and a blind retry may fix it. This is the library's
+  behaviour before dispositions existed, and what you get when no policy is configured.
+- **`MANUAL`** — a human or an external system must decide. The execution stays `FAILED` and
+  resumable from the failure point, but is invisible to every automatic recovery path.
+- **`REWIND`** — nothing was committed, so the whole in-flight transition is abandoned and the
+  execution is parked back at the state it came from. The caller re-fires the same event rather
+  than resuming mid-state.
+- **`ABORT`** — permanent. A business rule was violated, an input was invalid. The snapshot is kept
+  for auditing but every recovery path refuses it.
+
+### Where policies attach
+
+Three levels, consulted most-specific first. A policy returning `null` has **no opinion** and the
+next level is consulted:
+
+```
+sub-step policy  →  state policy  →  machine policy  →  RETRY
+```
+
+That `null`-means-defer rule is what makes partial policies natural — a state-level policy can
+single out one sub-step and let everything else fall through.
+
+```java
+// machine level — a rule that holds everywhere
+StateMachine.<OrderContext>define("order")
+    .failurePolicy(FailurePolicy.onErrorType(IllegalArgumentException.class,
+                                             FailureDisposition.ABORT))
+
+// state level — the usual place; the policy sees the sub-step name and index
+    .state("PROCESSING")
+        .failurePolicy(FailurePolicy.onFirstSubStep(FailureDisposition.REWIND))
+        .subStep("reserve-stock",  ctx -> reserve(ctx))
+        .subStep("charge-payment", ctx -> charge(ctx))
+
+// sub-step level — for one step that differs from the rest of its state
+        .subStep("notify", ctx -> notify(ctx), FailurePolicy.always(FailureDisposition.MANUAL))
+```
+
+Class-based sub-steps declare their own by overriding `SubStepHandler.failurePolicy()`.
+
+### Built-in policies
+
+| Factory | Decides when |
+|---|---|
+| `FailurePolicy.always(d)` | every failure |
+| `FailurePolicy.onSubStep(name, d)` | the named sub-step failed |
+| `FailurePolicy.onFirstSubStep(d)` | the state's first sub-step failed |
+| `FailurePolicy.onErrorType(Class, d)` | the exception is of that type or a subtype |
+
+Chain them with `.orElse(...)`, most specific first:
+
+```java
+FailurePolicy.<OrderContext>onSubStep("reserve-stock", FailureDisposition.REWIND)
+    .orElse(FailurePolicy.onErrorType(IllegalArgumentException.class, FailureDisposition.ABORT))
+    .orElse(FailurePolicy.always(FailureDisposition.RETRY));
+```
+
+Or write one directly — it is a functional interface over a `FailureContext`, which carries
+`stateName`, `sourceStateName`, `subStepName`, `subStepIndex`, `isFirstSubStep`,
+`hasCommittedSubSteps`, `attemptNumber`, `result`, the original `error`, and the live `context`:
+
+```java
+.failurePolicy(f -> f.attemptNumber() > 5 ? FailureDisposition.MANUAL : null)
+```
+
+A policy runs on the execution thread while the failure is being recorded — keep it fast and
+side-effect free. A policy that throws is treated as "no opinion" and logged; a broken policy never
+takes the execution down with it.
+
+### REWIND in detail
+
+`REWIND` exists for the case where a state's *first* sub-step fails: nothing downstream was
+committed, so resuming from the failure point is the wrong recovery — the state was never really
+entered, and the caller should just re-send the event.
+
+```java
+.state("PERFORM_SIM_SWAP")
+    .failurePolicy(FailurePolicy.onFirstSubStep(FailureDisposition.REWIND))
+    .subStep("reserve-msisdn", ctx -> reserve(ctx))   // fails → whole transition abandoned
+    .subStep("activate-sim",   ctx -> activate(ctx))  // fails → normal retry from here
+```
+
+After a rewind the snapshot is `WAITING` at the **source** state, so `eligibilityOf()` reports
+`READY` and `trigger(executionId, sameEvent)` runs the state again from its first sub-step.
+
+The failure details ride along on that `WAITING` snapshot — `failedStateName`,
+`failedSubStepName`, `lastErrorMessage`, `lastErrorType` — so a rewound execution is still
+diagnosable. `attemptNumber` is bumped and **never reset**, so repeated rewind → re-trigger cycles
+remain countable.
+
+**Two safety rules the library enforces.** A rewind is only honoured when there is a source state to
+return to *and* no sub-step of the abandoned state has committed (succeeded outright, or been
+skipped on a resume because it succeeded earlier). If either fails, the disposition is **downgraded
+to `MANUAL`** and a warning is logged, rather than silently discarding the record of work that
+really happened.
+
+**Idempotency requirement.** The transition action and the target state's `onEntry` hook have
+already run and will run again on re-trigger. No compensating `onExit` is invoked. Keep both
+idempotent — the same guidance that already applies to hooks generally.
+
+### Reading the disposition
+
+`ManagedTransitionResult.getFailureDisposition()` carries it back to the caller, so an HTTP layer
+can pick a status code without reloading the snapshot:
+
+```java
+if (result.isFailed()) {
+    return switch (result.getFailureDisposition()) {
+        case RETRY  -> accepted("will retry automatically");
+        case MANUAL -> conflict("needs operator action");
+        case REWIND -> conflict("re-send the same request to try again");
+        case ABORT  -> unprocessable(result.getRootCause().getMessage());
+    };
+}
+```
+
+On the snapshot it is `getFailureDisposition()`, with `isAutoRecoverable()` as the shorthand for
+"disposition is `RETRY`". `MachineFailedEvent.getDisposition()` carries it to listeners, and a
+`MachineRewoundEvent` is emitted when a rewind is applied.
+
+### What is *not* covered
+
+Dispositions govern **sub-step failures only**. Failures in transition actions, `onEntry`/`onExit`
+hooks, guards, and the `ContextLoader` still propagate as exceptions without writing a snapshot —
+see [Limitations](07-limitations.md#14-failure-dispositions-cover-sub-step-failures-only).
 
 ---
 
@@ -507,6 +656,8 @@ log.info("Submitted {} failed executions for retry", submitted);
 
 **Scope: `FAILED` only.** `RETRY_SCHEDULED` rows belong to the in-process coordinator and are left untouched. Do **not** run `recoverFailedExecutions` and an auto-retry coordinator on the same definition simultaneously — with a coordinator, `FAILED` means "policy exhausted", and the sweep would override that decision.
 
+**Scope: disposition `RETRY` only.** Executions classified `MANUAL` or `ABORT` by a [`FailurePolicy`](#failure-dispositions) are excluded — that is the point of the classification. The filter is part of the query predicate, so those rows are never loaded, and it is re-checked under the per-execution lock before each retry in case a concurrent failure re-classified the execution after the page was read.
+
 **Bounded by `maxAttempts`.** Only executions with `attempt_number < maxAttempts` are fetched. Rows at or above the cap are never loaded; exhausted rows stop being retried naturally.
 
 **Attempt-number semantics.** Each call to `recoverFailedExecutions` that retries an execution increments its `attempt_number` by exactly 1 before invoking `proceed()`. Generic `proceed()` and the coordinator path do **not** increment this counter — `attempt_number` therefore reads as "number of sweep retry attempts made by `recoverFailedExecutions`".
@@ -521,13 +672,13 @@ log.info("Submitted {} failed executions for retry", submitted);
 
 | | `recoverPendingRetries()` | `recoverFailedExecutions(maxAttempts)` |
 |---|---|---|
-| Scope | `FAILED` + `RETRY_SCHEDULED` | `FAILED` only |
+| Scope | `FAILED` + `RETRY_SCHEDULED`, disposition `RETRY` | `FAILED` only, disposition `RETRY` |
 | Requires | `RetryCoordinator` on definition | `recoveryExecutor` on definition |
 | Threading | Internal single-thread daemon | Consumer-supplied executor |
 | Distribution | In-process only | Consumer-driven (leader election recommended) |
 | Attempt counter | Managed by coordinator | Incremented by sweep (`attempt_number < maxAttempts`) |
 
-The V2 schema migration (see [JDBC & Spring Boot](08-jdbc-and-spring-boot.md#schema-migrations)) adds a composite index on `(status, attempt_number)` to accelerate the sweep query `WHERE status = 'FAILED' AND attempt_number < ?`.
+The V4 schema migration (see [JDBC & Spring Boot](08-jdbc-and-spring-boot.md#schema-migrations)) adds a composite index on `(status, failure_disposition, attempt_number)` covering the full sweep query `WHERE status = 'FAILED' AND failure_disposition = 'RETRY' AND attempt_number < ?`. The V2 index on `(status, attempt_number)` is retained; it still serves `listPendingRetries`.
 
 ### Cost
 

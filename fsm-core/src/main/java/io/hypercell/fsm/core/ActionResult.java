@@ -43,11 +43,28 @@ public final class ActionResult {
      */
     private final String errorType;
 
+    /**
+     * The original exception, kept live for in-process decisions.
+     * <p>
+     * Deliberately NOT part of the serialized form — {@link #errorType} and
+     * {@link #errorMessage} are the durable representation. This reference only survives
+     * within the JVM that produced the failure, which is all that
+     * {@link io.hypercell.fsm.failure.FailurePolicy} and
+     * {@link io.hypercell.fsm.retry.RetryPolicy} need: both are consulted synchronously
+     * while the failure is being recorded. A result reloaded from a snapshot always has a
+     * {@code null} cause.
+     * <p>
+     * Only FAILED results ever carry one, and FAILED results are excluded from
+     * {@code completedSubStepResults}, so nothing new becomes serializable.
+     */
+    private final Throwable cause;
+
     private ActionResult(Status status, Map<String, Object> output,
-                         String errorMessage, String errorType) {
+                         String errorMessage, String errorType, Throwable cause) {
         this.status = status;
         this.errorMessage = errorMessage;
         this.errorType = errorType;
+        this.cause = cause;
         this.output = output != null ? Map.copyOf(output) : Collections.emptyMap();
     }
 
@@ -55,30 +72,33 @@ public final class ActionResult {
      * Action succeeded with no output data.
      */
     public static ActionResult success() {
-        return new ActionResult(Status.SUCCESS, null, null, null);
+        return new ActionResult(Status.SUCCESS, null, null, null, null);
     }
 
     /**
      * Action succeeded and produced output that later steps can read.
      */
     public static ActionResult success(Map<String, Object> output) {
-        return new ActionResult(Status.SUCCESS, output, null, null);
+        return new ActionResult(Status.SUCCESS, output, null, null, null);
     }
 
     /**
-     * Action failed with an exception. The throwable is decomposed into strings.
+     * Action failed with an exception. The throwable is decomposed into strings for storage,
+     * and also retained live via {@link #getCause()} for in-process policy decisions.
      */
     public static ActionResult failed(Throwable error) {
         return new ActionResult(Status.FAILED, null,
                 error.getMessage(),
-                error.getClass().getName());
+                error.getClass().getName(),
+                error);
     }
 
     /**
      * Action failed with a plain message (no exception available).
+     * Results created this way have a {@code null} {@link #getCause()}.
      */
     public static ActionResult failed(String message) {
-        return new ActionResult(Status.FAILED, null, message, null);
+        return new ActionResult(Status.FAILED, null, message, null, null);
     }
 
     /**
@@ -87,19 +107,23 @@ public final class ActionResult {
      * during resume — callers should not construct SKIPPED results themselves.
      */
     public static ActionResult skipped() {
-        return new ActionResult(Status.SKIPPED, null, null, null);
+        return new ActionResult(Status.SKIPPED, null, null, null, null);
     }
 
     public Status getStatus() {
         return status;
     }
 
-    /** Key-value data produced by the action; empty map if the action produced no output. */
+    /**
+     * Key-value data produced by the action; empty map if the action produced no output.
+     */
     public Map<String, Object> getOutput() {
         return output;
     }
 
-    /** Human-readable error description; {@code null} unless status is {@code FAILED}. */
+    /**
+     * Human-readable error description; {@code null} unless status is {@code FAILED}.
+     */
     public String getErrorMessage() {
         return errorMessage;
     }
@@ -113,17 +137,38 @@ public final class ActionResult {
         return errorType;
     }
 
-    /** {@code true} when status is {@code SUCCESS}. */
+    /**
+     * The original exception that caused this failure, or {@code null}.
+     * <p>
+     * Non-null only for results created by {@link #failed(Throwable)} <em>in the current JVM</em>.
+     * It is never serialized, so a result restored from a snapshot always returns {@code null} —
+     * use {@link #getErrorType()} and {@link #getErrorMessage()} for durable error information.
+     * <p>
+     * This is what lets {@link io.hypercell.fsm.failure.FailurePolicy#onErrorType} and
+     * {@link io.hypercell.fsm.retry.RetryPolicy#shouldRetry} branch on the real exception type
+     * rather than a string.
+     */
+    public Throwable getCause() {
+        return cause;
+    }
+
+    /**
+     * {@code true} when status is {@code SUCCESS}.
+     */
     public boolean isSuccess() {
         return status == Status.SUCCESS;
     }
 
-    /** {@code true} when status is {@code FAILED}. */
+    /**
+     * {@code true} when status is {@code FAILED}.
+     */
     public boolean isFailed() {
         return status == Status.FAILED;
     }
 
-    /** {@code true} when status is {@code SKIPPED} (set internally by the library on resume). */
+    /**
+     * {@code true} when status is {@code SKIPPED} (set internally by the library on resume).
+     */
     public boolean isSkipped() {
         return status == Status.SKIPPED;
     }

@@ -5,6 +5,7 @@ import io.hypercell.fsm.core.ExecutionStatus;
 import io.hypercell.fsm.core.StateMachineDefinition;
 import io.hypercell.fsm.core.StateMachineInstance;
 import io.hypercell.fsm.exception.*;
+import io.hypercell.fsm.failure.FailureDisposition;
 import io.hypercell.fsm.lock.ExecutionLockHandle;
 import io.hypercell.fsm.lock.ExecutionLockProvider;
 import io.hypercell.fsm.resume.ExecutionSnapshot;
@@ -124,7 +125,9 @@ public class DefaultStateMachineManager<C> implements StateMachineManager<C> {
         ExecutionSnapshot snapshot = snapshotOpt.get();
         return switch (snapshot.getStatus()) {
             case WAITING -> TriggerEligibility.READY;
-            case FAILED, RETRY_SCHEDULED -> TriggerEligibility.NEEDS_PROCEED;
+            case FAILED, RETRY_SCHEDULED -> snapshot.getFailureDisposition() == FailureDisposition.ABORT
+                    ? TriggerEligibility.ABORTED
+                    : TriggerEligibility.NEEDS_PROCEED;
             case RUNNING -> TriggerEligibility.NEEDS_RESUME;
             case TERMINATED -> TriggerEligibility.TERMINATED;
         };
@@ -155,6 +158,7 @@ public class DefaultStateMachineManager<C> implements StateMachineManager<C> {
 
         for (ExecutionSnapshot snapshot : pending) {
             boolean shouldRecover = (snapshot.getStatus() == SnapshotStatus.RETRY_SCHEDULED || snapshot.getStatus() == SnapshotStatus.FAILED)
+                    && snapshot.isAutoRecoverable()
                     && definition.retryCoordinator().getRetryPolicy().shouldRetry(snapshot.getAttemptNumber(), null);
 
             if (!shouldRecover) continue;
@@ -239,6 +243,7 @@ public class DefaultStateMachineManager<C> implements StateMachineManager<C> {
                         .failedStateName(e.getStateName())
                         .failedSubStepName(e.getSubStepName())
                         .rootCause(e.getCause())
+                        .failureDisposition(dispositionOf(instance.executionId()))
                         .context(instance.context())
                         .build();
             }
@@ -354,7 +359,10 @@ public class DefaultStateMachineManager<C> implements StateMachineManager<C> {
             Optional<ExecutionSnapshot> opt = repository.load(executionId);
             if (opt.isEmpty()) return;
             ExecutionSnapshot snap = opt.get();
-            if (!snap.isFailed() || snap.getAttemptNumber() >= maxAttempts) return;
+            // Re-check the disposition too: the page was read outside the lock, and a
+            // concurrent failure may have re-classified this execution as MANUAL or ABORT.
+            if (!snap.isFailed() || !snap.isAutoRecoverable()
+                    || snap.getAttemptNumber() >= maxAttempts) return;
 
             repository.save(executionId, snap.withAttemptNumber(snap.getAttemptNumber() + 1));
 
@@ -440,6 +448,7 @@ public class DefaultStateMachineManager<C> implements StateMachineManager<C> {
                     .failedStateName(e.getStateName())
                     .failedSubStepName(e.getSubStepName())
                     .rootCause(e.getCause())
+                    .failureDisposition(dispositionOf(executionId))
                     .context(ctx)
                     .build();
         }
@@ -483,6 +492,7 @@ public class DefaultStateMachineManager<C> implements StateMachineManager<C> {
                     .failedStateName(e.getStateName())
                     .failedSubStepName(e.getSubStepName())
                     .rootCause(e.getCause())
+                    .failureDisposition(dispositionOf(instance.executionId()))
                     .context(instance.context())
                     .build();
         }
@@ -502,6 +512,10 @@ public class DefaultStateMachineManager<C> implements StateMachineManager<C> {
         if (!snapshot.isFailed()) {
             throw new IllegalStateException(
                     "proceed() requires a FAILED snapshot. Current status: " + snapshot.getStatus());
+        }
+        if (snapshot.getFailureDisposition() == FailureDisposition.ABORT) {
+            throw new ExecutionAbortedException(executionId, snapshot.getFailedStateName(),
+                    snapshot.getFailedSubStepName(), snapshot.getLastErrorMessage());
         }
 
         C ctx = resolveContext(executionId, contextOverride);
@@ -526,9 +540,24 @@ public class DefaultStateMachineManager<C> implements StateMachineManager<C> {
                     .failedStateName(e.getStateName())
                     .failedSubStepName(e.getSubStepName())
                     .rootCause(e.getCause())
+                    .failureDisposition(dispositionOf(executionId))
                     .context(instance.context())
                     .build();
         }
+    }
+
+    /**
+     * Re-read the disposition the instance just persisted for a failure.
+     * <p>
+     * The classification happens inside the instance while it records the failure, so the
+     * authoritative answer is on the freshly saved snapshot rather than on the exception. Falls
+     * back to {@link FailureDisposition#RETRY} if the snapshot is unreadable, matching what an
+     * unclassified failure would have been.
+     */
+    private FailureDisposition dispositionOf(String executionId) {
+        return repository.load(executionId)
+                .map(ExecutionSnapshot::getFailureDisposition)
+                .orElse(FailureDisposition.RETRY);
     }
 
     /**
@@ -577,6 +606,7 @@ public class DefaultStateMachineManager<C> implements StateMachineManager<C> {
                     .failedStateName(e.getStateName())
                     .failedSubStepName(e.getSubStepName())
                     .rootCause(e.getCause())
+                    .failureDisposition(dispositionOf(executionId))
                     .context(ctx)
                     .build();
         }

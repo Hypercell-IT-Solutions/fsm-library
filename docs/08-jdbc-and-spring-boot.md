@@ -312,7 +312,7 @@ server.port=8080
 
 On application startup, the FSM library:
 
-1. **Runs the schema migration runner** — bootstraps the two tracking tables (`fsm_schema_history`, `fsm_schema_lock`), acquires a distributed DB lock, applies any not-yet-applied versioned migrations in order (V1: creates the `fsm_snapshots` table and its status index; V2: adds the composite `(status, attempt_number)` index for the failed-execution sweep; V3: creates the `fsm_execution_locks` table for distributed execution locking), verifies checksums of previously-applied migrations, and releases the lock. The migration is safe under concurrent multi-replica startup. See [Schema migrations](#schema-migrations) below for configuration options.
+1. **Runs the schema migration runner** — bootstraps the two tracking tables (`fsm_schema_history`, `fsm_schema_lock`), acquires a distributed DB lock, applies any not-yet-applied versioned migrations in order (V1: creates the `fsm_snapshots` table and its status index; V2: adds the composite `(status, attempt_number)` index for the failed-execution sweep; V3: creates the `fsm_execution_locks` table for distributed execution locking; V4: adds the `failure_disposition` and `last_error_type` columns plus the sweep index), verifies checksums of previously-applied migrations, and releases the lock. The migration is safe under concurrent multi-replica startup. See [Schema migrations](#schema-migrations) below for configuration options.
 2. **Calls `recoverPendingRetries()`** to resume any failed executions that are scheduled for retry.
 3. *(Optional, single-instance only)* **Calls `recoverInterruptedExecutions()`** to complete executions whose process crashed mid-transition.
 
@@ -408,7 +408,7 @@ public void sweepFailedExecutions() {
 }
 ```
 
-The V2 migration adds a composite index on `(status, attempt_number)` to accelerate the sweep query `WHERE status = 'FAILED' AND attempt_number < ?`.
+The sweep query is `WHERE status = 'FAILED' AND failure_disposition = 'RETRY' AND attempt_number < ?`, covered by the composite index `(status, failure_disposition, attempt_number)` added by V4. The `failure_disposition` predicate is what keeps executions classified [`MANUAL` or `ABORT`](05-persistence-and-retry.md#failure-dispositions) out of the sweep — they are filtered in SQL and never loaded. The V2 index on `(status, attempt_number)` is retained; it still serves `listPendingRetries`.
 
 ---
 
@@ -451,6 +451,7 @@ The bundled per-dialect SQL files are located at `io/hypercell/fsm/db/migrations
 - `V1__create_snapshots.sql` — creates the `fsm_snapshots` table and its `status` index
 - `V2__add_attempt_number_index.sql` — adds the composite `(status, attempt_number)` index for the `recoverFailedExecutions` sweep
 - `V3__create_execution_locks.sql` — creates the `fsm_execution_locks` table used by `JdbcExecutionLockProvider`
+- `V4__add_failure_disposition.sql` — adds `failure_disposition VARCHAR(30) NOT NULL DEFAULT 'RETRY'` and `last_error_type VARCHAR(255)` to `fsm_snapshots`, plus the `(status, failure_disposition, attempt_number)` sweep index. The `NOT NULL DEFAULT` backfills existing rows as `RETRY`, which is exactly how the library behaved before dispositions existed, so no data migration is required.
 
 You can apply these files directly with your database CLI, or feed them into an existing Flyway/Liquibase pipeline. `VALIDATE` mode is the recommended choice for production teams that apply DDL through a controlled change-management process: it guarantees the application will not start against a schema that is behind, without ever touching the database itself.
 

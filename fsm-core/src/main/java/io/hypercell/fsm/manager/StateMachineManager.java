@@ -128,11 +128,22 @@ public interface StateMachineManager<C> {
      * Use this when you want to retry a failed execution before the next business
      * event arrives — for example, a scheduled job that retries all FAILED executions.
      * The caller controls when to retry; the library handles which sub-steps to skip.
+     * <p>
+     * Works for failures disposition {@link io.hypercell.fsm.failure.FailureDisposition#RETRY}
+     * and {@link io.hypercell.fsm.failure.FailureDisposition#MANUAL} — the latter is precisely
+     * the case this method exists for, since automatic sweeps skip those.
+     *
+     * @throws io.hypercell.fsm.exception.ExecutionAbortedException if the failure was
+     *                                                              disposition {@code ABORT}
+     * @throws io.hypercell.fsm.exception.CompletedMachineException if the execution is TERMINATED
+     * @throws IllegalStateException                                if the snapshot is not FAILED
      */
     ManagedTransitionResult<C> proceed(String executionId);
 
     /**
      * Manually retry with a context override.
+     * <p>
+     * Subject to the same disposition constraints as {@link #proceed(String)}.
      */
     ManagedTransitionResult<C> proceed(String executionId, C contextOverride);
 
@@ -309,6 +320,15 @@ public interface StateMachineManager<C> {
      * <em>not</em> run this sweep and an auto-retry coordinator on the same definition
      * simultaneously — with a coordinator, {@code FAILED} means "policy exhausted", and
      * this sweep would override that decision.
+     *
+     * <p><strong>Scope: disposition {@code RETRY} only.</strong> Executions whose failure was
+     * classified {@link io.hypercell.fsm.failure.FailureDisposition#MANUAL} or
+     * {@link io.hypercell.fsm.failure.FailureDisposition#ABORT} by a
+     * {@link io.hypercell.fsm.failure.FailurePolicy} are excluded — that is the point of the
+     * classification. The filter lives in the query predicate
+     * ({@link io.hypercell.fsm.resume.SnapshotRepository#listFailed}), so those rows are never
+     * loaded, and it is re-checked under the per-execution lock before each retry in case a
+     * concurrent failure re-classified the execution after the page was read.
      *
      * <p><strong>Bounded by {@code maxAttempts}.</strong> Only executions with
      * {@code attempt_number < maxAttempts} are fetched. This cap is applied in the query

@@ -39,11 +39,27 @@ class ActionResultTest {
     }
 
     @Test
+    void failedFromThrowable_retainsTheLiveCause() {
+        // FailurePolicy.onErrorType and RetryPolicy.shouldRetry branch on the real type,
+        // so the throwable must survive alongside its stringified form.
+        RuntimeException ex = new IllegalStateException("connection refused");
+        ActionResult r = ActionResult.failed(ex);
+        assertThat(r.getCause()).isSameAs(ex);
+    }
+
+    @Test
     void failedFromString_hasNullErrorType() {
         ActionResult r = ActionResult.failed("payment declined");
         assertThat(r.isFailed()).isTrue();
         assertThat(r.getErrorMessage()).isEqualTo("payment declined");
         assertThat(r.getErrorType()).isNull();
+    }
+
+    @Test
+    void nonThrowableResults_haveNoCause() {
+        assertThat(ActionResult.failed("payment declined").getCause()).isNull();
+        assertThat(ActionResult.success().getCause()).isNull();
+        assertThat(ActionResult.skipped().getCause()).isNull();
     }
 
     @Test

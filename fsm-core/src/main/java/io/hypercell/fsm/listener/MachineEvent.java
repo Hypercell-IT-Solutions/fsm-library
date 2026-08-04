@@ -1,6 +1,7 @@
 package io.hypercell.fsm.listener;
 
 import io.hypercell.fsm.core.ActionResult;
+import io.hypercell.fsm.failure.FailureDisposition;
 
 import java.time.Instant;
 
@@ -227,13 +228,16 @@ public abstract class MachineEvent<C> {
         private final String stateName;
         private final String subStepName;
         private final int attemptNumber;
+        private final FailureDisposition disposition;
 
         public MachineFailedEvent(String executionId, String machineId,
-                                  String stateName, String subStepName, int attemptNumber) {
+                                  String stateName, String subStepName, int attemptNumber,
+                                  FailureDisposition disposition) {
             super(executionId, machineId);
             this.stateName = stateName;
             this.subStepName = subStepName;
             this.attemptNumber = attemptNumber;
+            this.disposition = disposition;
         }
 
         public String getStateName() {
@@ -242,6 +246,72 @@ public abstract class MachineEvent<C> {
 
         public String getSubStepName() {
             return subStepName;
+        }
+
+        public int getAttemptNumber() {
+            return attemptNumber;
+        }
+
+        /**
+         * How this failure was classified — the disposition that will be persisted on the
+         * snapshot. Alerting can use it to distinguish "will retry itself" from "needs a human".
+         * Never {@code null}.
+         */
+        public FailureDisposition getDisposition() {
+            return disposition;
+        }
+    }
+
+    /**
+     * Fired when a failure was classified {@link FailureDisposition#REWIND} and the in-flight
+     * transition was abandoned — the execution has been parked back at the state it came from
+     * and is eligible for {@code trigger()} again.
+     * <p>
+     * Emitted instead of nothing extra: a {@link MachineFailedEvent} carrying
+     * {@code REWIND} is emitted first, then this one once the rewind has been persisted.
+     */
+    public static final class MachineRewoundEvent<C> extends MachineEvent<C> {
+        private final String failedStateName;
+        private final String failedSubStepName;
+        private final String rewoundToState;
+        private final String triggerEvent;
+        private final int attemptNumber;
+
+        public MachineRewoundEvent(String executionId, String machineId,
+                                   String failedStateName, String failedSubStepName,
+                                   String rewoundToState, String triggerEvent, int attemptNumber) {
+            super(executionId, machineId);
+            this.failedStateName = failedStateName;
+            this.failedSubStepName = failedSubStepName;
+            this.rewoundToState = rewoundToState;
+            this.triggerEvent = triggerEvent;
+            this.attemptNumber = attemptNumber;
+        }
+
+        /**
+         * The state whose sub-step failed — the one that was abandoned.
+         */
+        public String getFailedStateName() {
+            return failedStateName;
+        }
+
+        public String getFailedSubStepName() {
+            return failedSubStepName;
+        }
+
+        /**
+         * The state the execution was parked at; re-firing {@link #getTriggerEvent()} from here
+         * retries the whole transition.
+         */
+        public String getRewoundToState() {
+            return rewoundToState;
+        }
+
+        /**
+         * The event that was in flight and can now be re-fired; may be {@code null}.
+         */
+        public String getTriggerEvent() {
+            return triggerEvent;
         }
 
         public int getAttemptNumber() {

@@ -4,13 +4,19 @@ import io.hypercell.fsm.core.*;
 import io.hypercell.fsm.exception.InvalidEventException;
 import io.hypercell.fsm.exception.StateMachineException;
 import io.hypercell.fsm.exception.SubStepExecutionException;
+import io.hypercell.fsm.failure.FailureContext;
+import io.hypercell.fsm.failure.FailureDisposition;
+import io.hypercell.fsm.failure.FailurePolicy;
 import io.hypercell.fsm.listener.EventBus;
 import io.hypercell.fsm.listener.MachineEvent;
 import io.hypercell.fsm.resume.ExecutionSnapshot;
 import io.hypercell.fsm.resume.SnapshotRepository;
 import io.hypercell.fsm.resume.SnapshotStatus;
 import io.hypercell.fsm.retry.RetryCoordinator;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
+import java.time.Instant;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
@@ -30,6 +36,7 @@ import java.util.stream.Collectors;
  * @param <C> the context type flowing through the machine
  */
 public class DefaultStateMachineInstance<C> implements StateMachineInstance<C> {
+    private static final Logger log = LoggerFactory.getLogger(DefaultStateMachineInstance.class);
 
     private final String executionId;
     private final StateMachineDefinition<C> definition;
@@ -83,8 +90,7 @@ public class DefaultStateMachineInstance<C> implements StateMachineInstance<C> {
             SubStepRunResult result = subStepRunner.run(
                     initialState, ctx, executionRecord, this::saveCheckpoint);
             if (result.isFailed()) {
-                handleFailure(initialState.name(), result.getFailedSubStepName(),
-                        result.getError(), null);
+                handleFailure(initialState, result, null);
                 throw new SubStepExecutionException(
                         initialState.name(), result.getFailedSubStepName(), result.getError());
             }
@@ -158,7 +164,7 @@ public class DefaultStateMachineInstance<C> implements StateMachineInstance<C> {
 
         StateDefinition<C> nextState = definition.stateByName(transition.targetState());
         currentState = nextState;
-        executionRecord.setCurrentStateName(nextState.name());
+        executionRecord.moveTo(nextState.name());
 
         eventBus.publish(new MachineEvent.TransitionFiredEvent<>(
                 executionId, definition.id(), fromState, nextState.name(), event));
@@ -172,8 +178,7 @@ public class DefaultStateMachineInstance<C> implements StateMachineInstance<C> {
             SubStepRunResult runResult = subStepRunner.run(
                     nextState, ctx, executionRecord, this::saveCheckpoint);
             if (runResult.isFailed()) {
-                handleFailure(nextState.name(), runResult.getFailedSubStepName(),
-                        runResult.getError(), event);
+                handleFailure(nextState, runResult, event);
                 throw new SubStepExecutionException(
                         nextState.name(), runResult.getFailedSubStepName(), runResult.getError());
             }
@@ -239,13 +244,13 @@ public class DefaultStateMachineInstance<C> implements StateMachineInstance<C> {
      */
     private StateDefinition<C> runRemainingSubSteps(String pendingEvent) {
         if (!currentState.subSteps().isEmpty()) {
+            StateDefinition<C> state = currentState;
             SubStepRunResult runResult = subStepRunner.run(
-                    currentState, ctx, executionRecord, this::saveCheckpoint);
+                    state, ctx, executionRecord, this::saveCheckpoint);
             if (runResult.isFailed()) {
-                handleFailure(currentState.name(), runResult.getFailedSubStepName(),
-                        runResult.getError(), pendingEvent);
+                handleFailure(state, runResult, pendingEvent);
                 throw new SubStepExecutionException(
-                        currentState.name(), runResult.getFailedSubStepName(), runResult.getError());
+                        state.name(), runResult.getFailedSubStepName(), runResult.getError());
             }
         }
 
@@ -310,8 +315,36 @@ public class DefaultStateMachineInstance<C> implements StateMachineInstance<C> {
         }
     }
 
-    private void handleFailure(String stateName, String subStepName,
-                               Throwable error, String pendingEvent) {
+    /**
+     * Record a sub-step failure and act on how it was classified.
+     * <p>
+     * The {@link FailurePolicy} chain runs first, because the resolved
+     * {@link FailureDisposition} decides everything that follows: what status is persisted,
+     * where the execution ends up, and whether the retry machinery is engaged at all. The
+     * caller throws {@link SubStepExecutionException} afterwards in every case — the disposition
+     * changes what is durable, not what the synchronous caller sees.
+     *
+     * @param state        the state whose sub-step failed
+     * @param runResult    the failing run result, carrying the step name, index, and error
+     * @param pendingEvent the event in flight, or {@code null}
+     */
+    private void handleFailure(StateDefinition<C> state, SubStepRunResult runResult, String pendingEvent) {
+        String stateName = state.name();
+        String subStepName = runResult.getFailedSubStepName();
+        String sourceStateName = executionRecord.getPreviousStateName();
+
+        FailureDisposition disposition = resolveDisposition(
+                state, runResult, pendingEvent, sourceStateName);
+
+        if (disposition == FailureDisposition.REWIND
+                && !canRewind(stateName, sourceStateName)) {
+            log.warn("[FSM] Execution '{}' requested REWIND at '{}/{}' but it is not safe "
+                            + "(sourceState={}, committedSubSteps={}); falling back to MANUAL",
+                    executionId, stateName, subStepName, sourceStateName,
+                    executionRecord.hasCommittedStepsFor(stateName));
+            disposition = FailureDisposition.MANUAL;
+        }
+
         executionStatus = ExecutionStatus.FAILED;
         executionRecord.markFailed(stateName, subStepName);
 
@@ -319,15 +352,138 @@ public class DefaultStateMachineInstance<C> implements StateMachineInstance<C> {
                 .filter(s -> s.getResult().isFailed()).count();
 
         eventBus.publish(new MachineEvent.MachineFailedEvent<>(
-                executionId, definition.id(), stateName, subStepName, (int) failCount));
+                executionId, definition.id(), stateName, subStepName, (int) failCount,
+                disposition));
+
+        if (disposition == FailureDisposition.REWIND) {
+            rewindTo(sourceStateName, stateName, subStepName, runResult, pendingEvent);
+            return;
+        }
 
         if (snapshotRepository != null) {
-            snapshotRepository.save(executionId, takeSnapshot(pendingEvent));
+            snapshotRepository.save(executionId,
+                    takeSnapshot(pendingEvent).withFailureDisposition(disposition));
         }
 
-        if (retryCoordinator != null) {
-            retryCoordinator.onFailure(this, pendingEvent, error);
+        if (retryCoordinator != null && disposition == FailureDisposition.RETRY) {
+            retryCoordinator.onFailure(this, pendingEvent, runResult.getError());
         }
+    }
+
+    /**
+     * Walk the policy chain — sub-step, then state, then machine — and return the first
+     * disposition anyone commits to, defaulting to {@link FailureDisposition#RETRY}.
+     * <p>
+     * A policy that throws is treated as "no opinion" and logged: a broken policy should not
+     * turn a recoverable failure into an unhandled exception on the execution thread.
+     */
+    private FailureDisposition resolveDisposition(StateDefinition<C> state,
+                                                  SubStepRunResult runResult,
+                                                  String pendingEvent,
+                                                  String sourceStateName) {
+        FailureContext<C> failure = buildFailureContext(
+                state, runResult, pendingEvent, sourceStateName);
+
+        int index = runResult.getFailedSubStepIndex();
+        FailurePolicy<C> subStepPolicy = index >= 0 && index < state.subSteps().size()
+                ? state.subSteps().get(index).failurePolicy()
+                : null;
+
+        FailureDisposition decided = decide(subStepPolicy, failure, "sub-step");
+        if (decided == null) decided = decide(state.failurePolicy().orElse(null), failure, "state");
+        if (decided == null) decided = decide(definition.failurePolicy(), failure, "machine");
+
+        return decided != null ? decided : FailureDisposition.RETRY;
+    }
+
+    private FailureDisposition decide(FailurePolicy<C> policy, FailureContext<C> failure,
+                                      String level) {
+        if (policy == null) return null;
+        try {
+            return policy.decide(failure);
+        } catch (Exception e) {
+            log.warn("[FSM] {}-level FailurePolicy threw for execution '{}'; treating as "
+                    + "no opinion", level, executionId, e);
+            return null;
+        }
+    }
+
+    private FailureContext<C> buildFailureContext(StateDefinition<C> state,
+                                                  SubStepRunResult runResult,
+                                                  String pendingEvent,
+                                                  String sourceStateName) {
+        return FailureContext.<C>builder()
+                .executionId(executionId)
+                .machineDefinitionId(definition.id())
+                .stateName(state.name())
+                .sourceStateName(sourceStateName)
+                .triggerEvent(pendingEvent != null ? pendingEvent : executionRecord.getLastTriggerEvent())
+                .subStepName(runResult.getFailedSubStepName())
+                .subStepIndex(runResult.getFailedSubStepIndex())
+                .firstSubStep(runResult.getFailedSubStepIndex() == 0)
+                .committedSubSteps(executionRecord.hasCommittedStepsFor(state.name()))
+                .attemptNumber(attemptNumber)
+                .result(runResult.getResult())
+                .error(runResult.getError())
+                .context(ctx)
+                .build();
+    }
+
+    /**
+     * A rewind is only sound when the abandoned state committed nothing and there is somewhere
+     * to go back to. Without a source state the execution has nowhere to park (the failure
+     * happened on the initial state, or during a resume that fired no transition); with
+     * committed sub-steps, rewinding would discard the record of side effects that really did
+     * happen and re-run them on the next attempt.
+     */
+    private boolean canRewind(String stateName, String sourceStateName) {
+        return sourceStateName != null && !executionRecord.hasCommittedStepsFor(stateName);
+    }
+
+    /**
+     * Abandon the in-flight transition: drop the failed state's step records, reposition at the
+     * source state, and persist a {@code WAITING} snapshot there so the caller can re-fire the
+     * event.
+     * <p>
+     * The failure details ride along on the {@code WAITING} snapshot — failed state, failed
+     * sub-step, error message and type, and the bumped attempt number — so a rewound execution
+     * is still diagnosable and repeated rewinds are still countable. {@code attemptNumber} is
+     * never reset.
+     */
+    private void rewindTo(String sourceStateName, String failedStateName, String failedSubStepName,
+                          SubStepRunResult runResult, String pendingEvent) {
+        executionRecord.rewindTo(sourceStateName, failedStateName);
+        currentState = definition.stateByName(sourceStateName);
+
+        if (snapshotRepository != null) {
+            ActionResult failure = runResult.getResult();
+            Instant now = Instant.now();
+            snapshotRepository.save(executionId, new ExecutionSnapshot.Builder()
+                    .executionId(executionId)
+                    .machineDefinitionId(definition.id())
+                    .currentStateName(sourceStateName)
+                    .failedStateName(failedStateName)
+                    .failedSubStepName(failedSubStepName)
+                    .lastTriggerEvent(pendingEvent)
+                    .completedSubStepResults(executionRecord.getSteps().stream()
+                            .filter(s -> s.getResult().isSuccess())
+                            .collect(Collectors.toMap(
+                                    StepRecord::compositeKey,
+                                    StepRecord::getResult,
+                                    (existing, replacement) -> replacement)))
+                    .attemptNumber(attemptNumber + 1)
+                    .lastFailedAt(now)
+                    .lastErrorMessage(failure != null ? failure.getErrorMessage() : null)
+                    .lastErrorType(failure != null ? failure.getErrorType() : null)
+                    .failureDisposition(FailureDisposition.REWIND)
+                    .status(SnapshotStatus.WAITING)
+                    .capturedAt(now)
+                    .build());
+        }
+
+        eventBus.publish(new MachineEvent.MachineRewoundEvent<>(
+                executionId, definition.id(), failedStateName, failedSubStepName,
+                sourceStateName, pendingEvent, attemptNumber + 1));
     }
 
     private void runEntryHook(StateDefinition<C> state) {

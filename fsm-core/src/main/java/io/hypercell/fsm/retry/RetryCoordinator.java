@@ -5,7 +5,6 @@ import io.hypercell.fsm.core.StateMachineDefinition;
 import io.hypercell.fsm.core.StateMachineInstance;
 import io.hypercell.fsm.exception.ConcurrentRetryException;
 import io.hypercell.fsm.exception.RetryException;
-import io.hypercell.fsm.exception.StateMachineException;
 import io.hypercell.fsm.resume.ExecutionSnapshot;
 import io.hypercell.fsm.resume.SnapshotRepository;
 import io.hypercell.fsm.resume.SnapshotStatus;
@@ -91,6 +90,12 @@ public class RetryCoordinator<C> {
         log.info("[RetryCoordinator] Execution '{}' failed (attempt {}). Failed sub-step: '{}' in state '{}'",
                 executionId, snapshot.getAttemptNumber(), snapshot.getFailedSubStepName(),
                 snapshot.getFailedStateName());
+
+        if (!snapshot.isAutoRecoverable()) {
+            log.info("[RetryCoordinator] Execution '{}' is dispositioned {} — no auto-retry",
+                    executionId, snapshot.getFailureDisposition());
+            return;
+        }
 
         if (!retryPolicy.shouldRetry(snapshot.getAttemptNumber(), error)) {
             log.info("[RetryCoordinator] RetryPolicy says stop — no auto-retry for '{}'", executionId);

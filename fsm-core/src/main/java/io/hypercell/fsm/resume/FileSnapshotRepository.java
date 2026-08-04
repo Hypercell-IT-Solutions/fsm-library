@@ -2,6 +2,7 @@ package io.hypercell.fsm.resume;
 
 import io.hypercell.fsm.core.ActionResult;
 import io.hypercell.fsm.exception.SnapshotException;
+import io.hypercell.fsm.failure.FailureDisposition;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -120,7 +121,8 @@ public class FileSnapshotRepository implements SnapshotRepository {
                 .map(this::load)
                 .filter(Optional::isPresent)
                 .map(Optional::get)
-                .filter(s -> s.isFailed() && s.getAttemptNumber() < maxAttempts)
+                .filter(s -> s.isFailed() && s.isAutoRecoverable()
+                        && s.getAttemptNumber() < maxAttempts)
                 .sorted(java.util.Comparator.comparing(ExecutionSnapshot::getExecutionId))
                 .filter(s -> afterExecutionId == null
                         || s.getExecutionId().compareTo(afterExecutionId) > 0)
@@ -142,6 +144,8 @@ public class FileSnapshotRepository implements SnapshotRepository {
      * lastFailedAt         = 2024-01-15T10:42:01Z
      * scheduledRetryAt     = 2024-01-15T10:42:05Z   (omitted if absent)
      * lastErrorMessage     = Payment gateway timeout
+     * lastErrorType        = java.net.SocketTimeoutException
+     * failureDisposition   = RETRY
      * status               = FAILED
      * capturedAt           = 2024-01-15T10:42:01Z
      * completedStep.0.key  = PROCESSING::charge-payment
@@ -162,6 +166,8 @@ public class FileSnapshotRepository implements SnapshotRepository {
         set(p, SnapshotFields.LAST_FAILED_AT, s.getLastFailedAt() != null ? s.getLastFailedAt().toString() : null);
         set(p, SnapshotFields.SCHEDULED_RETRY_AT, s.getScheduledRetryAt() != null ? s.getScheduledRetryAt().toString() : null);
         set(p, SnapshotFields.LAST_ERROR_MESSAGE, s.getLastErrorMessage());
+        set(p, SnapshotFields.LAST_ERROR_TYPE, s.getLastErrorType());
+        p.setProperty(SnapshotFields.FAILURE_DISPOSITION, s.getFailureDisposition().name());
         p.setProperty(SnapshotFields.STATUS, s.getStatus().name());
         p.setProperty(SnapshotFields.CAPTURED_AT, s.getCapturedAt().toString());
 
@@ -231,6 +237,10 @@ public class FileSnapshotRepository implements SnapshotRepository {
                 .lastFailedAt(parseInstant(p.getProperty(SnapshotFields.LAST_FAILED_AT)))
                 .scheduledRetryAt(scheduledStr != null ? parseInstant(scheduledStr) : null)
                 .lastErrorMessage(p.getProperty(SnapshotFields.LAST_ERROR_MESSAGE))
+                .lastErrorType(p.getProperty(SnapshotFields.LAST_ERROR_TYPE))
+                .failureDisposition(FailureDisposition.valueOf(
+                        p.getProperty(SnapshotFields.FAILURE_DISPOSITION,
+                                FailureDisposition.RETRY.name())))
                 .status(SnapshotStatus.valueOf(p.getProperty(SnapshotFields.STATUS, "FAILED")))
                 .capturedAt(parseInstant(p.getProperty(SnapshotFields.CAPTURED_AT)))
                 .build();
@@ -293,6 +303,8 @@ public class FileSnapshotRepository implements SnapshotRepository {
         public static final String LAST_FAILED_AT = "lastFailedAt";
         public static final String SCHEDULED_RETRY_AT = "scheduledRetryAt";
         public static final String LAST_ERROR_MESSAGE = "lastErrorMessage";
+        public static final String LAST_ERROR_TYPE = "lastErrorType";
+        public static final String FAILURE_DISPOSITION = "failureDisposition";
         public static final String STATUS = "status";
         public static final String CAPTURED_AT = "capturedAt";
         private static final String COMPLETED_STEP = "completedStep.";

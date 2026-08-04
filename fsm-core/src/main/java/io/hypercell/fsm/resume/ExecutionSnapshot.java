@@ -3,6 +3,7 @@ package io.hypercell.fsm.resume;
 import io.hypercell.fsm.core.ActionResult;
 import io.hypercell.fsm.execution.ExecutionRecord;
 import io.hypercell.fsm.execution.StepRecord;
+import io.hypercell.fsm.failure.FailureDisposition;
 
 import java.time.Instant;
 import java.util.Collections;
@@ -46,6 +47,8 @@ public class ExecutionSnapshot {
     private final Instant lastFailedAt;
     private final Instant scheduledRetryAt;
     private final String lastErrorMessage;
+    private final String lastErrorType;
+    private final FailureDisposition failureDisposition;
     private SnapshotStatus status;
     private final Instant capturedAt;
 
@@ -62,6 +65,8 @@ public class ExecutionSnapshot {
         this.lastFailedAt = builder.lastFailedAt;
         this.scheduledRetryAt = builder.scheduledRetryAt;
         this.lastErrorMessage = builder.lastErrorMessage;
+        this.lastErrorType = builder.lastErrorType;
+        this.failureDisposition = builder.failureDisposition;
         this.status = builder.status;
         this.capturedAt = builder.capturedAt;
     }
@@ -69,6 +74,14 @@ public class ExecutionSnapshot {
     /**
      * Factory method called by DefaultStateMachineInstance.takeSnapshot().
      * Converts the live ExecutionRecord into a serializable snapshot.
+     * <p>
+     * The error message and type are read back out of the record's entry for the failed
+     * sub-step. They are the only durable trace of <em>why</em> an execution failed: the failed
+     * {@link ActionResult} itself is deliberately excluded from {@code completedSubStepResults}
+     * (only successes are stored there, since those are what resume skips).
+     * <p>
+     * The disposition defaults to {@link FailureDisposition#RETRY}; the caller applies the
+     * resolved one via {@link #withFailureDisposition(FailureDisposition)}.
      */
     public static ExecutionSnapshot fromRecord(
             ExecutionRecord executionRecord,
@@ -76,6 +89,10 @@ public class ExecutionSnapshot {
             String machineDefinitionId,
             int attemptNumber,
             Map<String, ActionResult> completedSubStepResults) {
+        ActionResult failure = executionRecord
+                .resultOf(executionRecord.getFailedStateName(), executionRecord.getFailedSubStepName())
+                .orElse(null);
+
         return new Builder()
                 .executionId(executionRecord.getExecutionId())
                 .machineDefinitionId(machineDefinitionId)
@@ -86,7 +103,9 @@ public class ExecutionSnapshot {
                 .completedSubStepResults(completedSubStepResults)
                 .attemptNumber(attemptNumber)
                 .lastFailedAt(Instant.now())
-                .lastErrorMessage(null)
+                .lastErrorMessage(failure != null ? failure.getErrorMessage() : null)
+                .lastErrorType(failure != null ? failure.getErrorType() : null)
+                .failureDisposition(FailureDisposition.RETRY)
                 .status(SnapshotStatus.FAILED)
                 .capturedAt(Instant.now())
                 .build();
@@ -145,6 +164,17 @@ public class ExecutionSnapshot {
      */
     public ExecutionSnapshot withMachineDefinitionId(String id) {
         return new Builder(this).machineDefinitionId(id).build();
+    }
+
+    /**
+     * Return a copy of this snapshot carrying a different {@link FailureDisposition}.
+     * <p>
+     * Applied by the runtime once the {@link io.hypercell.fsm.failure.FailurePolicy} chain has
+     * classified the failure. The disposition is what keeps non-retryable failures out of
+     * {@link io.hypercell.fsm.manager.StateMachineManager#recoverFailedExecutions(int)}.
+     */
+    public ExecutionSnapshot withFailureDisposition(FailureDisposition disposition) {
+        return new Builder(this).failureDisposition(disposition).build();
     }
 
     /**
@@ -259,6 +289,39 @@ public class ExecutionSnapshot {
     }
 
     /**
+     * The fully-qualified class name of the exception behind the most recent failure;
+     * {@code null} when the execution never failed or the sub-step reported failure without
+     * throwing (i.e. returned {@code ActionResult.failed(message)}).
+     */
+    public String getLastErrorType() {
+        return lastErrorType;
+    }
+
+    /**
+     * How the most recent failure should be handled. Never {@code null} — defaults to
+     * {@link FailureDisposition#RETRY}, which is the library's historical behaviour.
+     * <p>
+     * Only meaningful once an execution has failed at least once. On a {@code WAITING}
+     * snapshot a non-{@code RETRY} value is the residue of a
+     * {@link FailureDisposition#REWIND}, recorded alongside {@code failedStateName} and
+     * {@code lastErrorMessage} so operators can see why the execution was rewound.
+     */
+    public FailureDisposition getFailureDisposition() {
+        return failureDisposition;
+    }
+
+    /**
+     * {@code true} when this snapshot is eligible for automatic recovery — that is, its
+     * disposition is {@link FailureDisposition#RETRY}.
+     * <p>
+     * {@link SnapshotRepository#listFailed} implementations use this to filter; the JDBC
+     * repository pushes the equivalent predicate into SQL instead.
+     */
+    public boolean isAutoRecoverable() {
+        return failureDisposition == FailureDisposition.RETRY;
+    }
+
+    /**
      * The current persistence status of this snapshot.
      */
     public SnapshotStatus getStatus() {
@@ -309,6 +372,8 @@ public class ExecutionSnapshot {
         Instant lastFailedAt = Instant.now();
         Instant scheduledRetryAt;
         String lastErrorMessage;
+        String lastErrorType;
+        FailureDisposition failureDisposition = FailureDisposition.RETRY;
         SnapshotStatus status = SnapshotStatus.FAILED;
         Instant capturedAt = Instant.now();
 
@@ -327,6 +392,8 @@ public class ExecutionSnapshot {
             this.lastFailedAt = source.lastFailedAt;
             this.scheduledRetryAt = source.scheduledRetryAt;
             this.lastErrorMessage = source.lastErrorMessage;
+            this.lastErrorType = source.lastErrorType;
+            this.failureDisposition = source.failureDisposition;
             this.status = source.status;
             this.capturedAt = source.capturedAt;
         }
@@ -383,6 +450,21 @@ public class ExecutionSnapshot {
 
         public Builder lastErrorMessage(String v) {
             lastErrorMessage = v;
+            return this;
+        }
+
+        public Builder lastErrorType(String v) {
+            lastErrorType = v;
+            return this;
+        }
+
+        /**
+         * Set the failure disposition. {@code null} is normalised to
+         * {@link FailureDisposition#RETRY} so the field is never null on a built snapshot —
+         * this is also how rows written before the disposition existed are interpreted.
+         */
+        public Builder failureDisposition(FailureDisposition v) {
+            failureDisposition = v != null ? v : FailureDisposition.RETRY;
             return this;
         }
 

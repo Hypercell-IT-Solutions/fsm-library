@@ -75,6 +75,7 @@ ContextLoader<C> contextLoader()                     // context loader configure
 ResumePolicy<C> resumePolicy()
 RetryCoordinator<C> retryCoordinator()
 ExecutionLockProvider lockProvider()                 // default: ReentrantExecutionLockProvider
+FailurePolicy<C> failurePolicy()                     // machine-wide policy; null if none configured
 
 // State validation
 boolean isInitialState(String stateName)             // true if stateName is the initial state
@@ -165,6 +166,7 @@ String name()                              // unique within this machine
 boolean isTerminal()                       // true if no outgoing transitions
 List<SubStepDefinition<C>> subSteps()      // ordered work to execute on entry
 Optional<StateHook<C>> hook()              // entry/exit callbacks, if any
+Optional<FailurePolicy<C>> failurePolicy() // classifies failures of this state's sub-steps
 ```
 
 ---
@@ -223,8 +225,9 @@ Hooks are **not retry-tracked** — they re-run on every entry/exit even after a
 A named unit of work within a state.
 
 ```java
-String name()         // stable snapshot key — treat like a DB column name
-Action<C> action()    // the work to execute
+String name()                      // stable snapshot key — treat like a DB column name
+Action<C> action()                 // the work to execute
+FailurePolicy<C> failurePolicy()   // null = no opinion, defer to the state policy
 ```
 
 Sub-step names must be unique within a state and must not contain `::`.
@@ -293,9 +296,10 @@ Class-based alternative to an inline lambda for sub-steps. Useful for Spring DI 
 String name()                              // stable snapshot key
 ActionResult execute(C context) throws Exception
 default Action<C> asAction()               // adapter for places that expect Action<C>
+default FailurePolicy<C> failurePolicy()   // null = no opinion; override to classify this step's failures
 ```
 
-Register via `StateBuilder.subStep(SubStepHandler<C>)`.
+Register via `StateBuilder.subStep(SubStepHandler<C>)`, which picks up `failurePolicy()` automatically.
 
 ---
 
@@ -313,6 +317,7 @@ StateMachineBuilder<C> retryScheduler(RetryScheduler s)
 StateMachineBuilder<C> contextLoader(Function<String, C> loader)
 StateMachineBuilder<C> resumePolicy(ResumePolicy<C> p)
 StateMachineBuilder<C> executionLockProvider(ExecutionLockProvider provider)  // default: ReentrantExecutionLockProvider
+StateMachineBuilder<C> failurePolicy(FailurePolicy<C> policy)     // machine-wide default; last level of the chain
 StateMachineBuilder<C> listener(MachineEventListener<C> listener)  // repeatable
 
 StateBuilder<C> state(String name)              // inline state definition
@@ -331,9 +336,11 @@ Returned by `StateMachineBuilder.state(String name)`.
 
 ```java
 StateBuilder<C> subStep(String name, Action<C> action)
+StateBuilder<C> subStep(String name, Action<C> action, FailurePolicy<C> policy)  // per-sub-step policy
 StateBuilder<C> subStep(SubStepHandler<C> handler)
-StateBuilder<C> onEntry(Consumer<C> fn)   // composable: multiple calls stack
-StateBuilder<C> onExit(Consumer<C> fn)    // composable: multiple calls stack
+StateBuilder<C> onEntry(Consumer<C> fn)          // composable: multiple calls stack
+StateBuilder<C> onExit(Consumer<C> fn)           // composable: multiple calls stack
+StateBuilder<C> failurePolicy(FailurePolicy<C> p) // classifies failures of this state's sub-steps
 StateBuilder<C> terminal()
 TransitionBuilder<C> on(String event)     // begin defining a transition
 StateMachineBuilder<C> and()              // close state, return to machine builder
@@ -372,6 +379,7 @@ void onSubStepFailed(MachineEvent.SubStepFailedEvent<C> event)
 void onMachineCompleted(MachineEvent.MachineCompletedEvent<C> event)
 void onMachineFailed(MachineEvent.MachineFailedEvent<C> event)
 void onMachineResumed(MachineEvent.MachineResumedEvent<C> event)
+void onMachineRewound(MachineEvent.MachineRewoundEvent<C> event)
 ```
 
 Listeners run **synchronously** on the calling thread. Exceptions are caught per-listener and logged; they do not propagate to the caller. See [Threading & safety — EventBus](04-threading-and-safety.md#eventbus-and-listeners--synchronous-on-the-calling-thread).
@@ -391,8 +399,9 @@ Each event type carries `executionId()`, `machineId()`, and `occurredAt()`. Addi
 | `SubStepSkippedEvent` | `stateName()`, `subStepName()` |
 | `SubStepFailedEvent` | `stateName()`, `subStepName()`, `error()` |
 | `MachineCompletedEvent` | `finalState()` |
-| `MachineFailedEvent` | `failedStateName()`, `failedSubStepName()`, `error()` |
+| `MachineFailedEvent` | `failedStateName()`, `failedSubStepName()`, `error()`, `getDisposition()` |
 | `MachineResumedEvent` | `stateName()`, `subStepName()` |
+| `MachineRewoundEvent` | `getFailedStateName()`, `getFailedSubStepName()`, `getRewoundToState()`, `getTriggerEvent()`, `getAttemptNumber()` |
 
 ---
 
@@ -455,7 +464,8 @@ ExecutionStatus getExecutionStatus()                // RUNNING | COMPLETED | FAI
 // Failure context (non-null only when status == FAILED)
 String getFailedSubStepName()
 String getFailedStateName()
-Throwable getRootCause()                           // underlying exception from the sub-step
+Throwable getRootCause()                           // the original exception from the sub-step
+FailureDisposition getFailureDisposition()         // how the failure was classified
 
 // Recovery hint
 boolean isProceededFromFailure()                   // true if manager auto-proceeded before applying the event
@@ -555,12 +565,21 @@ String getLastErrorType()            // fully-qualified exception class name
 Instant getLastFailedAt()
 Instant getScheduledRetryAt()        // null if not scheduled
 SnapshotStatus getStatus()
+FailureDisposition getFailureDisposition()   // never null; defaults to RETRY
 Map<String, ActionResult> getCompletedSubStepResults()   // keyed "stateName::subStepName"
 
 boolean isSubStepCompleted(String stateName, String subStepName)
 boolean isRunning()
 boolean isFailed()
-boolean isCompleted()
+boolean isWaiting()
+boolean isTerminated()
+boolean isAutoRecoverable()          // disposition == RETRY
+
+// Copy-with
+ExecutionSnapshot withStatus(SnapshotStatus s)
+ExecutionSnapshot withAttemptNumber(int n)
+ExecutionSnapshot withScheduledRetryAt(Instant t)     // also sets status RETRY_SCHEDULED
+ExecutionSnapshot withFailureDisposition(FailureDisposition d)
 ```
 
 ---
@@ -568,7 +587,7 @@ boolean isCompleted()
 ### `SnapshotStatus`
 
 ```java
-enum SnapshotStatus { FAILED, RETRY_SCHEDULED, RUNNING, COMPLETED }
+enum SnapshotStatus { FAILED, RETRY_SCHEDULED, RUNNING, WAITING, TERMINATED }
 ```
 
 See [Persistence & retry — SnapshotStatus lifecycle](05-persistence-and-retry.md#snapshotstatus-lifecycle) for the transition diagram.
@@ -723,6 +742,78 @@ new JdbcExecutionLockProvider(dataSource, dialect, Duration.ofMinutes(10), migra
 
 ---
 
+## Failure classification — `io.hypercell.fsm.failure`
+
+### `FailureDisposition`
+
+```java
+enum FailureDisposition { RETRY, MANUAL, REWIND, ABORT }
+```
+
+How a sub-step failure should be handled. Persisted on the snapshot, so a sweep running in another
+process sees the same decision. See
+[Persistence & retry — Failure dispositions](05-persistence-and-retry.md#failure-dispositions).
+
+| Disposition | Status | Positioned at | Swept | Auto-retry | `proceed()` | `trigger()` |
+|---|---|---|---|---|---|---|
+| `RETRY` | `FAILED` / `RETRY_SCHEDULED` | failed state | yes | yes | yes | throws |
+| `MANUAL` | `FAILED` | failed state | no | no | yes | throws |
+| `REWIND` | `WAITING` | source state | no | no | no-op | yes |
+| `ABORT` | `FAILED` | failed state | no | no | throws | throws |
+
+---
+
+### `FailurePolicy<C>`
+
+Functional interface. Returning `null` means "no opinion" and defers to the next level of the chain
+(`sub-step → state → machine → RETRY`).
+
+```java
+@FunctionalInterface
+public interface FailurePolicy<C> {
+    FailureDisposition decide(FailureContext<C> failure);
+
+    default FailurePolicy<C> orElse(FailurePolicy<C> next);
+
+    static <C> FailurePolicy<C> always(FailureDisposition d);
+    static <C> FailurePolicy<C> onSubStep(String subStepName, FailureDisposition d);
+    static <C> FailurePolicy<C> onFirstSubStep(FailureDisposition d);
+    static <C> FailurePolicy<C> onErrorType(Class<? extends Throwable> type, FailureDisposition d);
+}
+```
+
+Attach via `StateMachineBuilder.failurePolicy(...)`, `StateBuilder.failurePolicy(...)`,
+`StateBuilder.subStep(name, action, policy)`, or by overriding `SubStepHandler.failurePolicy()`.
+
+Policies run synchronously on the execution thread while the failure is recorded. A policy that
+throws is treated as "no opinion" and logged.
+
+---
+
+### `FailureContext<C>`
+
+Immutable. Everything a policy needs about one failure.
+
+```java
+String executionId()
+String machineDefinitionId()
+String stateName()               // state containing the failed sub-step
+String sourceStateName()         // where the transition came from; null on initialize()/proceed()
+String triggerEvent()
+String subStepName()
+int subStepIndex()               // 0-based position within the state
+boolean isFirstSubStep()
+boolean hasCommittedSubSteps()   // any SUCCESS/SKIPPED step recorded for this state
+int attemptNumber()
+ActionResult result()            // errorMessage + errorType
+Throwable error()                // the original throwable; null if the step returned failed(String)
+C context()                      // live domain context — treat as read-only
+```
+
+Build one with `FailureContext.<C>builder()` when unit-testing a policy in isolation.
+
+---
+
 ## Retry — `io.hypercell.fsm.retry`
 
 ### `RetryPolicy`
@@ -762,6 +853,8 @@ Built-in implementation: `ThreadPoolRetryScheduler`.
 | `StateMachineConfigurationException` | Invalid machine definition at `build()` time |
 | `ConcurrentExecutionException` | Manager lock not acquired; another request holds it. Map to HTTP 409. |
 | `ConcurrentRetryException` | Manual retry attempted while auto-retry is in progress |
-| `CompletedMachineException` | Event triggered on an already-`COMPLETED` execution |
+| `CompletedMachineException` | Event triggered on an already-`TERMINATED` execution |
+| `ExecutionAbortedException` | `proceed()` called on a failure classified `ABORT`. Map to HTTP 422. |
+| `IllegalTriggerStateException` | `trigger()` called on a `FAILED`, `RUNNING`, or `RETRY_SCHEDULED` execution |
 | `RetryException` | Internal retry infrastructure error |
 | `SnapshotException` | Snapshot repository I/O failure |
