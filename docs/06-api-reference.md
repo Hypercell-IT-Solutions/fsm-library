@@ -317,6 +317,7 @@ StateMachineBuilder<C> retryScheduler(RetryScheduler s)
 StateMachineBuilder<C> contextLoader(Function<String, C> loader)
 StateMachineBuilder<C> resumePolicy(ResumePolicy<C> p)
 StateMachineBuilder<C> executionLockProvider(ExecutionLockProvider provider)  // default: ReentrantExecutionLockProvider
+StateMachineBuilder<C> executionScopeProvider(ExecutionScopeProvider<C> p)    // default: NoOpExecutionScopeProvider
 StateMachineBuilder<C> failurePolicy(FailurePolicy<C> policy)     // machine-wide default; last level of the chain
 StateMachineBuilder<C> listener(MachineEventListener<C> listener)  // repeatable
 
@@ -370,6 +371,7 @@ StateBuilder<C> end()                            // close transition, return to 
 All methods have default no-op implementations. Override only what you need.
 
 ```java
+void onInstanceCreated(MachineEvent.InstanceCreatedEvent<C> event)
 void onTransitionFired(MachineEvent.TransitionFiredEvent<C> event)
 void onStateEntered(MachineEvent.StateEnteredEvent<C> event)
 void onStateExited(MachineEvent.StateExitedEvent<C> event)
@@ -382,26 +384,85 @@ void onMachineResumed(MachineEvent.MachineResumedEvent<C> event)
 void onMachineRewound(MachineEvent.MachineRewoundEvent<C> event)
 ```
 
+Listeners are registered on the builder via `.listener(...)` and the set is frozen at `build()` — there is no way to add one to a machine afterwards.
+
 Listeners run **synchronously** on the calling thread. Exceptions are caught per-listener and logged; they do not propagate to the caller. See [Threading & safety — EventBus](04-threading-and-safety.md#eventbus-and-listeners--synchronous-on-the-calling-thread).
 
 ---
 
-### `MachineEvent<C>` (sealed base)
+### `MachineEvent<C>` (abstract base)
 
-Each event type carries `executionId()`, `machineId()`, and `occurredAt()`. Additional fields by subtype:
+Every event carries `getExecutionId()`, `getMachineId()`, `getOccurredAt()`, and `getContext()`.
 
-| Event type | Extra fields |
+`getContext()` returns the **live** domain object, not a copy. Listeners run on the execution thread, so a listener that mutates it is mutating what the next sub-step is about to read. Treat it as read-only.
+
+| Event type | Extra accessors |
 |---|---|
-| `TransitionFiredEvent` | `fromState()`, `toState()`, `event()` |
-| `StateEnteredEvent` | `stateName()` |
-| `StateExitedEvent` | `stateName()` |
-| `SubStepCompletedEvent` | `stateName()`, `subStepName()`, `result()` |
-| `SubStepSkippedEvent` | `stateName()`, `subStepName()` |
-| `SubStepFailedEvent` | `stateName()`, `subStepName()`, `error()` |
-| `MachineCompletedEvent` | `finalState()` |
-| `MachineFailedEvent` | `failedStateName()`, `failedSubStepName()`, `error()`, `getDisposition()` |
-| `MachineResumedEvent` | `stateName()`, `subStepName()` |
-| `MachineRewoundEvent` | `getFailedStateName()`, `getFailedSubStepName()`, `getRewoundToState()`, `getTriggerEvent()`, `getAttemptNumber()` |
+| `InstanceCreatedEvent` | `getOrigin()`, `getCurrentStateName()`, `getAttemptNumber()` |
+| `TransitionFiredEvent` | `getFromState()`, `getToState()`, `getEvent()` |
+| `StateEnteredEvent` | `getStateName()` |
+| `StateExitedEvent` | `getStateName()` |
+| `SubStepCompletedEvent` | `getStateName()`, `getSubStepName()`, `getResult()` |
+| `SubStepSkippedEvent` | `getStateName()`, `getSubStepName()` |
+| `SubStepFailedEvent` | `getStateName()`, `getSubStepName()`, `getResult()`, `getErrorMessage()`, `getErrorType()`, `getError()` |
+| `MachineCompletedEvent` | `getFinalStateName()` |
+| `MachineFailedEvent` | `getStateName()`, `getSubStepName()`, `getFailureCount()`, `getDisposition()`, `getFailureContext()` |
+| `MachineResumedEvent` | `getResumedAtState()`, `getResumedAtSubStep()`, `getAttemptNumber()` |
+| `MachineRewoundEvent` | `getFailedStateName()`, `getFailedSubStepName()`, `getRewoundToState()`, `getTriggerEvent()`, `getAttemptNumber()`, `getFailureContext()` |
+
+`MachineFailedEvent.getFailureCount()` counts failed sub-steps across the execution's whole history. It is **not** the retry attempt number — for that read `getFailureContext().attemptNumber()`. The two diverge whenever one attempt fails more than one sub-step.
+
+`SubStepFailedEvent` deliberately carries no `FailureContext`: it is published before the failure is classified, so no disposition exists yet.
+
+---
+
+### `InstanceCreatedEvent<C>` and `InstanceOrigin`
+
+Fired the moment an instance is constructed — before any state is entered, any sub-step runs, or any other event is published. This is the hook for per-execution setup that must be in place before work begins, typically stamping a correlation ID into the SLF4J MDC.
+
+`getOrigin()` returns why the instance exists:
+
+| `InstanceOrigin` | Created by |
+|---|---|
+| `NEW` | `newInstance(...)`, `initialize(...)`, first `trigger(...)` — fresh execution |
+| `RECONSTITUTED` | `trigger(...)` on a `WAITING` execution |
+| `RESUMED_FAILED` | `proceed(...)`, auto-retry, `recoverFailedExecutions(...)` |
+| `RESUMED_INTERRUPTED` | `resume(...)`, `recoverInterruptedExecutions()` |
+
+The origin matters because the two recovery sweeps run their work on the shared `recoveryExecutor`, not the caller's thread — so anything thread-local the caller established is absent.
+
+> **This event has no matching "destroyed" event.** An instance has no single point of death, so if you set a thread-local here you must clear it yourself — and on a pooled recovery thread, failing to do so leaks it into the next execution. Use [`ExecutionScopeProvider`](#executionscopeproviderc) instead, which the library closes in a `finally`.
+
+---
+
+## Execution scope — `io.hypercell.fsm.scope`
+
+### `ExecutionScopeProvider<C>`
+
+```java
+ExecutionScope open(ExecutionScopeInfo<C> info)   // returns an AutoCloseable handle
+```
+
+Establishes per-execution ambient state — MDC keys, a tracing span — around every unit of work. The library opens the scope after the context is resolved and before the machine instance is built, and closes it in a `finally`, so teardown is structural rather than a convention you have to remember.
+
+```java
+.executionScopeProvider(info -> {
+    MDC.put("executionId", info.executionId());
+    MDC.put("correlationId", info.context().getCorrelationId());
+    MDC.put("fsmOrigin", info.origin().name());
+    return () -> {
+        MDC.remove("executionId");
+        MDC.remove("correlationId");
+        MDC.remove("fsmOrigin");
+    };
+})
+```
+
+`ExecutionScopeInfo<C>` exposes `executionId()`, `machineId()`, `origin()`, and `context()`. It is deliberately smaller than `InstanceCreatedEvent` — the scope opens *before* the instance exists, because constructing a fresh instance already enters the initial state and runs its sub-steps.
+
+`ExecutionScope.close()` must not throw. The default is `NoOpExecutionScopeProvider`, which costs nothing when unconfigured.
+
+Scoped units of work: `trigger`, `proceed`, `initialize`, `resume`, each sweep retry, and each auto-retry fired by the `RetryCoordinator`.
 
 ---
 

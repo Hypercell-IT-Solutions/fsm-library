@@ -189,6 +189,8 @@ newInstance()
 
 ## Execution order for a single trigger
 
+Before any of this, the moment the instance is built the library publishes an `InstanceCreatedEvent` carrying an `InstanceOrigin` (`NEW`, `RECONSTITUTED`, `RESUMED_FAILED`, `RESUMED_INTERRUPTED`). It is the first event of an execution and precedes all work — including the initial state's sub-steps, which run inside the constructor of a fresh instance. Every event from here on carries the machine's context via `getContext()`.
+
 When you call `instance.trigger("SOME_EVENT")`:
 
 ```

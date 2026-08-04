@@ -121,10 +121,13 @@ fsm-library/
 │       ├── core/                   public interfaces (definitions, instances, managers)
 │       ├── execution/              runtime engine (internal)
 │       ├── exception/              typed exceptions
+│       ├── failure/                failure dispositions & policies
 │       ├── listener/               event bus & lifecycle callbacks
+│       ├── lock/                   per-execution mutual exclusion
 │       ├── manager/                HTTP request orchestration
 │       ├── resume/                 snapshots & persistence
-│       └── retry/                  retry policies & scheduling
+│       ├── retry/                  retry policies & scheduling
+│       └── scope/                  per-execution ambient state (MDC, tracing)
 │
 ├── fsm-jdbc/                       JDBC persistence (PostgreSQL, MySQL, MariaDB, H2, SQLite, Oracle)
 │   ├── JdbcSnapshotRepository      distributed snapshots with optimistic locking

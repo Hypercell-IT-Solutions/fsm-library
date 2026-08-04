@@ -68,6 +68,28 @@ dispatch option.
 `EventBus.publishAsync(executor, event)` dispatch mode that fans events out to a thread
 pool or a user-supplied `Executor`.
 
+**Related:** because dispatch is synchronous on the execution thread, `event.getContext()`
+hands a listener the live domain object rather than a copy. A listener that mutates it is
+mutating what the next sub-step will read. The library does not defend against this.
+
+---
+
+### 4a. Instance creation is observable, instance destruction is not
+
+**Problem:** `InstanceCreatedEvent` fires when an instance is built, but there is no matching
+"destroyed" event, because an instance has no single point of death — `trigger()`, `proceed()`
+and `resume()` are all entry points and any of them may throw. A listener that sets a
+thread-local in `onInstanceCreated` therefore has nowhere reliable to clear it, and on the
+pooled `recoveryExecutor` that leaks into the next execution.
+
+**Workaround (supported):** use `ExecutionScopeProvider`, which returns an `AutoCloseable` the
+library closes in a `finally` around each unit of work. That covers the MDC/tracing case, which
+is the reason instance-creation visibility was wanted in the first place.
+
+**Remaining gap:** there is still no event-level signal for "this execution is finished with this
+thread", so a listener that wants symmetric setup/teardown must use the scope SPI rather than the
+listener API.
+
 ---
 
 ### 5. Synchronous-only actions and sub-steps (`AsyncAction<C>` missing)

@@ -17,6 +17,8 @@ import io.hypercell.fsm.retry.NoAutoRetryPolicy;
 import io.hypercell.fsm.retry.RetryCoordinator;
 import io.hypercell.fsm.retry.RetryPolicy;
 import io.hypercell.fsm.retry.RetryScheduler;
+import io.hypercell.fsm.scope.ExecutionScopeProvider;
+import io.hypercell.fsm.scope.NoOpExecutionScopeProvider;
 
 import java.time.Duration;
 import java.util.*;
@@ -57,6 +59,7 @@ public class StateMachineBuilder<C> {
     private ExecutorService recoveryExecutor = null;
     private int recoveryPageSize = DefaultStateMachineDefinition.DEFAULT_RECOVERY_PAGE_SIZE;
     private ExecutionLockProvider executionLockProvider = new ReentrantExecutionLockProvider();
+    private ExecutionScopeProvider<C> executionScopeProvider = NoOpExecutionScopeProvider.instance();
     private FailurePolicy<C> failurePolicy = null;
 
     public StateMachineBuilder(String id) {
@@ -189,6 +192,31 @@ public class StateMachineBuilder<C> {
     }
 
     /**
+     * Establish per-execution ambient state — MDC keys, a tracing span — around every unit of work.
+     * <p>
+     * The library opens the scope before the machine instance is built and closes it in a
+     * {@code finally}, so a correlation ID set here cannot leak onto the next execution. That
+     * matters on the recovery sweeps, which run on the shared {@code recoveryExecutor} rather than
+     * the caller's thread.
+     * <pre>{@code
+     * .executionScopeProvider(info -> {
+     *     MDC.put("correlationId", info.context().getCorrelationId());
+     *     return () -> MDC.remove("correlationId");
+     * })
+     * }</pre>
+     * Defaults to {@link NoOpExecutionScopeProvider}.
+     *
+     * @param scopeProvider the scope provider; must not be {@code null}
+     */
+    public StateMachineBuilder<C> executionScopeProvider(ExecutionScopeProvider<C> scopeProvider) {
+        if (scopeProvider == null) {
+            throw new IllegalArgumentException("executionScopeProvider must not be null");
+        }
+        executionScopeProvider = scopeProvider;
+        return this;
+    }
+
+    /**
      * Set the machine-wide failure policy — the last level consulted before the
      * {@link io.hypercell.fsm.failure.FailureDisposition#RETRY} default.
      * <p>
@@ -303,7 +331,7 @@ public class StateMachineBuilder<C> {
         DefaultStateMachineDefinition<C> def = new DefaultStateMachineDefinition<>(
                 id, stateMap.get(initialStateName), stateMap, transitionMap,
                 resumePolicy, snapshotRepository, coordinator, bus, contextLoader, recoveryExecutor,
-                recoveryPageSize, executionLockProvider, failurePolicy);
+                recoveryPageSize, executionLockProvider, failurePolicy, executionScopeProvider);
         ref.set(def);
         return def;
     }
@@ -378,6 +406,11 @@ public class StateMachineBuilder<C> {
         @Override
         public ExecutionLockProvider lockProvider() {
             return d.lockProvider();
+        }
+
+        @Override
+        public ExecutionScopeProvider<C> executionScopeProvider() {
+            return d.executionScopeProvider();
         }
 
         @Override

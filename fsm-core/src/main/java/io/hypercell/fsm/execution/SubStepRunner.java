@@ -64,7 +64,7 @@ public class SubStepRunner<C> {
                 executionRecord.recordStep(state.name(), subStep.name(), stored);
 
                 eventBus.publish(new MachineEvent.SubStepSkippedEvent<>(
-                        executionId, machineId, state.name(), subStep.name()));
+                        executionId, machineId, ctx, state.name(), subStep.name()));
                 continue;
             }
 
@@ -83,9 +83,8 @@ public class SubStepRunner<C> {
 
             if (result.isFailed()) {
                 eventBus.publish(new MachineEvent.SubStepFailedEvent<>(
-                        executionId, machineId,
-                        state.name(), subStep.name(),
-                        result.getErrorMessage(), result.getErrorType()));
+                        executionId, machineId, ctx,
+                        state.name(), subStep.name(), result));
 
                 return SubStepRunResult.failed(subStep.name(), index, causeOf(result), result);
             }
@@ -93,7 +92,7 @@ public class SubStepRunner<C> {
             onStepCommitted.run();
 
             eventBus.publish(new MachineEvent.SubStepCompletedEvent<>(
-                    executionId, machineId, state.name(), subStep.name(), result));
+                    executionId, machineId, ctx, state.name(), subStep.name(), result));
         }
 
         return SubStepRunResult.completed();

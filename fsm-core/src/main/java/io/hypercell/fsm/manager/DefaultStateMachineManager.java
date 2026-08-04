@@ -6,11 +6,15 @@ import io.hypercell.fsm.core.StateMachineDefinition;
 import io.hypercell.fsm.core.StateMachineInstance;
 import io.hypercell.fsm.exception.*;
 import io.hypercell.fsm.failure.FailureDisposition;
+import io.hypercell.fsm.listener.InstanceOrigin;
 import io.hypercell.fsm.lock.ExecutionLockHandle;
 import io.hypercell.fsm.lock.ExecutionLockProvider;
 import io.hypercell.fsm.resume.ExecutionSnapshot;
 import io.hypercell.fsm.resume.SnapshotRepository;
 import io.hypercell.fsm.resume.SnapshotStatus;
+import io.hypercell.fsm.scope.ExecutionScope;
+import io.hypercell.fsm.scope.ExecutionScopeInfo;
+import io.hypercell.fsm.scope.ExecutionScopeProvider;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -22,6 +26,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 
 /**
  * Default implementation of {@link StateMachineManager}.
@@ -221,32 +226,34 @@ public class DefaultStateMachineManager<C> implements StateMachineManager<C> {
             }
 
             C ctx = resolveContext(executionId, null);
-            StateMachineInstance<C> instance =
-                    definition.resumeInterrupted(ctx, snapshot, repository);
-            String fromState = instance.currentState().name();
+            return inScope(executionId, InstanceOrigin.RESUMED_INTERRUPTED, ctx, () -> {
+                StateMachineInstance<C> instance =
+                        definition.resumeInterrupted(ctx, snapshot, repository);
+                String fromState = instance.currentState().name();
 
-            try {
-                instance.resume();
-                return ManagedTransitionResult.<C>builder()
-                        .executionId(instance.executionId())
-                        .fromState(fromState)
-                        .toState(instance.currentState().name())
-                        .executionStatus(instance.status())
-                        .context(instance.context())
-                        .build();
-            } catch (SubStepExecutionException e) {
-                return ManagedTransitionResult.<C>builder()
-                        .executionId(instance.executionId())
-                        .fromState(fromState)
-                        .toState(instance.currentState().name())
-                        .executionStatus(ExecutionStatus.FAILED)
-                        .failedStateName(e.getStateName())
-                        .failedSubStepName(e.getSubStepName())
-                        .rootCause(e.getCause())
-                        .failureDisposition(dispositionOf(instance.executionId()))
-                        .context(instance.context())
-                        .build();
-            }
+                try {
+                    instance.resume();
+                    return ManagedTransitionResult.<C>builder()
+                            .executionId(instance.executionId())
+                            .fromState(fromState)
+                            .toState(instance.currentState().name())
+                            .executionStatus(instance.status())
+                            .context(instance.context())
+                            .build();
+                } catch (SubStepExecutionException e) {
+                    return ManagedTransitionResult.<C>builder()
+                            .executionId(instance.executionId())
+                            .fromState(fromState)
+                            .toState(instance.currentState().name())
+                            .executionStatus(ExecutionStatus.FAILED)
+                            .failedStateName(e.getStateName())
+                            .failedSubStepName(e.getSubStepName())
+                            .rootCause(e.getCause())
+                            .failureDisposition(dispositionOf(instance.executionId()))
+                            .context(instance.context())
+                            .build();
+                }
+            });
         }
     }
 
@@ -402,7 +409,8 @@ public class DefaultStateMachineManager<C> implements StateMachineManager<C> {
 
         if (snapshotOpt.isEmpty()) {
             C ctx = resolveContext(executionId, contextOverride);
-            return firstTrigger(executionId, event, ctx);
+            return inScope(executionId, InstanceOrigin.NEW, ctx,
+                    () -> firstTrigger(executionId, event, ctx));
         }
 
         ExecutionSnapshot snapshot = snapshotOpt.get();
@@ -425,7 +433,8 @@ public class DefaultStateMachineManager<C> implements StateMachineManager<C> {
         }
 
         C ctx = resolveContext(executionId, contextOverride);
-        return reconstituteThenTrigger(executionId, event, ctx, snapshot);
+        return inScope(executionId, InstanceOrigin.RECONSTITUTED, ctx,
+                () -> reconstituteThenTrigger(executionId, event, ctx, snapshot));
     }
 
     /**
@@ -519,31 +528,33 @@ public class DefaultStateMachineManager<C> implements StateMachineManager<C> {
         }
 
         C ctx = resolveContext(executionId, contextOverride);
-        StateMachineInstance<C> instance = definition.resume(ctx, snapshot, repository);
-        String fromState = instance.currentState().name();
+        return inScope(executionId, InstanceOrigin.RESUMED_FAILED, ctx, () -> {
+            StateMachineInstance<C> instance = definition.resume(ctx, snapshot, repository);
+            String fromState = instance.currentState().name();
 
-        try {
-            instance.proceed();
-            return ManagedTransitionResult.<C>builder()
-                    .executionId(executionId)
-                    .fromState(fromState)
-                    .toState(instance.currentState().name())
-                    .executionStatus(instance.status())
-                    .context(instance.context())
-                    .build();
-        } catch (SubStepExecutionException e) {
-            return ManagedTransitionResult.<C>builder()
-                    .executionId(executionId)
-                    .fromState(fromState)
-                    .toState(instance.currentState().name())
-                    .executionStatus(ExecutionStatus.FAILED)
-                    .failedStateName(e.getStateName())
-                    .failedSubStepName(e.getSubStepName())
-                    .rootCause(e.getCause())
-                    .failureDisposition(dispositionOf(executionId))
-                    .context(instance.context())
-                    .build();
-        }
+            try {
+                instance.proceed();
+                return ManagedTransitionResult.<C>builder()
+                        .executionId(executionId)
+                        .fromState(fromState)
+                        .toState(instance.currentState().name())
+                        .executionStatus(instance.status())
+                        .context(instance.context())
+                        .build();
+            } catch (SubStepExecutionException e) {
+                return ManagedTransitionResult.<C>builder()
+                        .executionId(executionId)
+                        .fromState(fromState)
+                        .toState(instance.currentState().name())
+                        .executionStatus(ExecutionStatus.FAILED)
+                        .failedStateName(e.getStateName())
+                        .failedSubStepName(e.getSubStepName())
+                        .rootCause(e.getCause())
+                        .failureDisposition(dispositionOf(executionId))
+                        .context(instance.context())
+                        .build();
+            }
+        });
     }
 
     /**
@@ -588,28 +599,30 @@ public class DefaultStateMachineManager<C> implements StateMachineManager<C> {
         String initialStateName = definition.initialState().name();
         C ctx = resolveContext(executionId, contextOverride);
 
-        try {
-            StateMachineInstance<C> instance = definition.newInstance(ctx, executionId);
-            return ManagedTransitionResult.<C>builder()
-                    .executionId(executionId)
-                    .fromState(initialStateName)
-                    .toState(initialStateName)
-                    .executionStatus(ExecutionStatus.RUNNING)
-                    .context(instance.context())
-                    .build();
-        } catch (SubStepExecutionException e) {
-            return ManagedTransitionResult.<C>builder()
-                    .executionId(executionId)
-                    .fromState(initialStateName)
-                    .toState(initialStateName)
-                    .executionStatus(ExecutionStatus.FAILED)
-                    .failedStateName(e.getStateName())
-                    .failedSubStepName(e.getSubStepName())
-                    .rootCause(e.getCause())
-                    .failureDisposition(dispositionOf(executionId))
-                    .context(ctx)
-                    .build();
-        }
+        return inScope(executionId, InstanceOrigin.NEW, ctx, () -> {
+            try {
+                StateMachineInstance<C> instance = definition.newInstance(ctx, executionId);
+                return ManagedTransitionResult.<C>builder()
+                        .executionId(executionId)
+                        .fromState(initialStateName)
+                        .toState(initialStateName)
+                        .executionStatus(ExecutionStatus.RUNNING)
+                        .context(instance.context())
+                        .build();
+            } catch (SubStepExecutionException e) {
+                return ManagedTransitionResult.<C>builder()
+                        .executionId(executionId)
+                        .fromState(initialStateName)
+                        .toState(initialStateName)
+                        .executionStatus(ExecutionStatus.FAILED)
+                        .failedStateName(e.getStateName())
+                        .failedSubStepName(e.getSubStepName())
+                        .rootCause(e.getCause())
+                        .failureDisposition(dispositionOf(executionId))
+                        .context(ctx)
+                        .build();
+            }
+        });
     }
 
     /**
@@ -637,5 +650,21 @@ public class DefaultStateMachineManager<C> implements StateMachineManager<C> {
         throw new IllegalStateException(
                 "No ctx available for executionId '" + executionId + "'. " +
                         "Either configure a contextLoader or pass a contextOverride.");
+    }
+
+    /**
+     * Run one unit of work with the configured {@link ExecutionScopeProvider} open around it.
+     * <p>
+     * Opened after the context is resolved (so a scope can read it) and before the machine
+     * instance is built (so it covers the initial state's sub-steps, which run inside the
+     * constructor), and closed in a {@code finally} by try-with-resources. That last part is the
+     * point: the recovery sweeps run on the shared {@code recoveryExecutor}, where a thread-local
+     * left set would leak onto the next execution.
+     */
+    private <T> T inScope(String executionId, InstanceOrigin origin, C ctx, Supplier<T> work) {
+        try (ExecutionScope scope = definition.executionScopeProvider()
+                .open(new ExecutionScopeInfo<>(executionId, definition.id(), origin, ctx))) {
+            return work.get();
+        }
     }
 }
