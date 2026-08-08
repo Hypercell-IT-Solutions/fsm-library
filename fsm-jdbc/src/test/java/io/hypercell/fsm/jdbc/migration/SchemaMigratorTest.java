@@ -122,6 +122,41 @@ class SchemaMigratorTest {
                 .hasMessageContaining("V1");
     }
 
+    /**
+     * Re-running under the strict path must be clean: what {@code applyMigration} writes is what
+     * {@code recheckChecksums} recomputes, on any platform, because both go through the
+     * line-ending normalization in {@link Migration#checksum}.
+     */
+    @Test
+    void reRun_underStrictChecksum_isClean() {
+        DataSource ds = newDs();
+        migratorStrict(ds).migrate();
+
+        SchemaMigrator second = migratorStrict(ds);
+        assertThatNoException().isThrownBy(second::migrate);
+    }
+
+    /**
+     * Releases 1.0.0-RC4 and RC5 were packaged from a Windows checkout, so their jars carried CRLF
+     * migration resources and stored CRLF checksums. Those values are no longer accepted — the
+     * deliberate break documented in the RC6 release notes. RC1–RC3 databases are unaffected,
+     * since normalizing to LF reproduces the checksums those releases wrote.
+     */
+    @Test
+    void legacyCrlfChecksum_failsUnderStrictChecksum() throws Exception {
+        DataSource ds = newDs();
+        migratorStrict(ds).migrate();
+
+        // The MD5 of h2/V1__create_snapshots.sql as it appeared, CRLF-encoded, in the RC4/RC5 jars.
+        updateChecksum(ds, 1, "a944403b15733b3167a95bf897ac4302");
+
+        SchemaMigrator strict = migratorStrict(ds);
+        assertThatThrownBy(strict::migrate)
+                .isInstanceOf(MigrationException.class)
+                .hasMessageContaining("Checksum mismatch")
+                .hasMessageContaining("V1");
+    }
+
     @Test
     void validateMode_emptyDb_failsFast() {
         DataSource ds = newDs();

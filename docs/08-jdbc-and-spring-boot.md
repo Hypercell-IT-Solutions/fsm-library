@@ -12,7 +12,7 @@ For Spring Boot applications, the `fsm-spring-boot-starter-jdbc` module provides
 <dependency>
     <groupId>net.hypercell</groupId>
     <artifactId>fsm-spring-boot-starter-jdbc</artifactId>
-    <version>1.0.0-RC3</version>
+    <version>1.0.0-RC6</version>
 </dependency>
 ```
 
@@ -419,7 +419,7 @@ The migration runner is controlled by `fsm.jdbc.migration.*` properties:
 | Property | Default | Description |
 |---|---|---|
 | `fsm.jdbc.migration.mode` | `UPDATE` | `UPDATE` — apply pending migrations automatically at startup. `VALIDATE` — fail fast if the schema is behind; logs the full pending SQL for operators to run out-of-band. `OFF` — disable schema management entirely. |
-| `fsm.jdbc.migration.strict-checksum` | `false` | When `true`, a checksum mismatch on an already-applied migration causes a hard startup failure. When `false` (default), a warning is logged. |
+| `fsm.jdbc.migration.strict-checksum` | `true` | When `true` (default), a checksum mismatch on an already-applied migration causes a hard startup failure. When `false`, a warning is logged. |
 | `fsm.jdbc.migration.lock-ttl` | `5m` | How long the distributed migration lock is considered valid before being treated as stale and taken over by another node. |
 | `fsm.jdbc.migration.lock-wait-timeout` | `30s` | How long to wait for the migration lock before aborting startup with an error. |
 | `fsm.jdbc.lock.enabled` | `true` | When `true`, expose a `JdbcExecutionLockProvider` bean. Set to `false` to opt out and supply your own `ExecutionLockProvider` bean. |
@@ -454,6 +454,8 @@ The bundled per-dialect SQL files are located at `io/hypercell/fsm/db/migrations
 - `V4__add_failure_disposition.sql` — adds `failure_disposition VARCHAR(30) NOT NULL DEFAULT 'RETRY'` and `last_error_type VARCHAR(255)` to `fsm_snapshots`, plus the `(status, failure_disposition, attempt_number)` sweep index. The `NOT NULL DEFAULT` backfills existing rows as `RETRY`, which is exactly how the library behaved before dispositions existed, so no data migration is required.
 
 You can apply these files directly with your database CLI, or feed them into an existing Flyway/Liquibase pipeline. `VALIDATE` mode is the recommended choice for production teams that apply DDL through a controlled change-management process: it guarantees the application will not start against a schema that is behind, without ever touching the database itself.
+
+**Checksums.** Every applied migration's MD5 is recorded in `fsm_schema_history.checksum` and re-verified on each startup, so an edit to a migration that has already run somewhere is caught rather than silently ignored. The hash is taken over the SQL with line endings normalized to `\n`, which makes it a function of the migration's content and not of the platform that built the jar — a Windows build and a Linux build of the same release validate against the same database. Editing a shipped migration file is still not supported: add a new version instead.
 
 ---
 

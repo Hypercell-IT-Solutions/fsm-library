@@ -4,7 +4,7 @@ A lightweight, production-ready **Java finite state machine (FSM) library** for 
 
 Define your workflow as a **type-safe state machine** in Java 17. Run it synchronously in a single process, or drive it across multiple HTTP requests with full failure recovery and automatic retry — without writing any orchestration plumbing yourself.
 
-> **Status:** 1.0.0-RC3 — public API is stable; finalising enhancements before 1.0.0 GA.
+> **Status:** 1.0.0-RC6 — public API is stable; finalising enhancements before 1.0.0 GA.
 
 ---
 
@@ -48,7 +48,7 @@ Add the dependency to your `pom.xml`:
 <dependency>
     <groupId>net.hypercell</groupId>
     <artifactId>fsm-core</artifactId>
-    <version>1.0.0-RC3</version>
+    <version>1.0.0-RC6</version>
 </dependency>
 ```
 
@@ -84,7 +84,7 @@ For distributed deployments with Spring Boot and PostgreSQL, add the starter:
 <dependency>
     <groupId>net.hypercell</groupId>
     <artifactId>fsm-spring-boot-starter-jdbc</artifactId>
-    <version>1.0.0-RC3</version>
+    <version>1.0.0-RC6</version>
 </dependency>
 ```
 

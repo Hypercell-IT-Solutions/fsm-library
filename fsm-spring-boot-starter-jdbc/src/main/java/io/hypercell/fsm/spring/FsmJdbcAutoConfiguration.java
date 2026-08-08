@@ -31,7 +31,7 @@ import javax.sql.DataSource;
  *     dialect: postgresql|mysql|h2|sqlite|oracle
  *     migration:
  *       mode: UPDATE        # UPDATE (default), VALIDATE, or OFF
- *       strict-checksum: false
+ *       strict-checksum: true
  *       lock-ttl: 5m
  *       lock-wait-timeout: 30s
  *     lock:

@@ -1,0 +1,6 @@
+# Normalize text files in the repository, letting Git decide what is text.
+* text=auto
+
+# Migration SQL is copied verbatim into the jar and checksummed at runtime.
+# Pin it to LF so a build on any platform produces byte-identical resources.
+*.sql text eol=lf
