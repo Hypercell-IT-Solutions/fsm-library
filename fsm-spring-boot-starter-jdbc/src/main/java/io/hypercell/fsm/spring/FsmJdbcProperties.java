@@ -107,8 +107,11 @@ public class FsmJdbcProperties {
         private MigrationMode mode = MigrationMode.UPDATE;
 
         /**
-         * When {@code true}, a checksum mismatch on an already-applied migration causes
-         * a hard failure. When {@code false} (default) a warning is logged instead.
+         * When {@code true} (default), a checksum mismatch on an already-applied migration causes
+         * a hard failure. When {@code false}, a warning is logged instead.
+         * <p>
+         * Checksums ignore line-ending differences, so this does not fire merely because the jar
+         * was built on a different platform.
          */
         private boolean strictChecksum = true;
 

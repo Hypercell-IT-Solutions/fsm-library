@@ -708,11 +708,14 @@ public interface SqlDialect {
 
 If you implement a custom dialect, you must:
 1. Implement `String id()` and return a stable, lowercase identifier (e.g. `"mydb"`).
-2. Bundle migration SQL files under `io/hypercell/fsm/db/migrations/<id>/` on the classpath for every registered migration version. Currently that means four files:
+2. Bundle migration SQL files under `io/hypercell/fsm/db/migrations/<id>/` on the classpath for every registered migration version. Currently that means five files:
    - `bootstrap.sql` — creates `fsm_schema_history` and `fsm_schema_lock`, seeds the lock row
    - `V1__create_snapshots.sql` — creates the `fsm_snapshots` table and its status index
    - `V2__add_attempt_number_index.sql` — adds the composite `(status, attempt_number)` index
    - `V3__create_execution_locks.sql` — creates the `fsm_execution_locks` table
+   - `V4__add_failure_disposition.sql` — adds `failure_disposition` and `last_error_type`, plus the `(status, failure_disposition, attempt_number)` sweep index
+
+   Save them with LF line endings; the runner normalizes them before checksumming, so CRLF files still work, but LF keeps the jar byte-reproducible across platforms.
 
 The library bundles these files for the five built-in dialects (`postgresql`, `mysql`, `h2`, `sqlite`, `oracle`) only.
 

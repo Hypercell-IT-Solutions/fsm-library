@@ -26,6 +26,13 @@ import java.util.HexFormat;
  * <p>Checksums are computed as MD5 over the UTF-8 SQL content and represented
  * as lowercase hex strings. They are stored in {@code fsm_schema_history} to
  * detect post-apply file tampering.
+ *
+ * <p><strong>Line endings are normalized to {@code \n} before hashing.</strong> A checksum is meant
+ * to answer "did this migration's SQL change?", and a CRLF/LF difference changes no SQL. Without
+ * normalization the answer depends on the platform that built the jar — a Windows checkout with
+ * {@code core.autocrlf=true} yields CRLF resources and therefore different checksums from a Linux
+ * build of the very same commit, which makes an upgrade fail against a database migrated by the
+ * other build. Normalizing makes the value a function of content alone.
  */
 public record Migration(int version, String description) {
 
@@ -50,7 +57,8 @@ public record Migration(int version, String description) {
     }
 
     /**
-     * Loads the SQL content for this migration from the classpath.
+     * Loads the SQL content for this migration from the classpath, with line endings normalized
+     * to {@code \n}.
      *
      * @param dialectId the active dialect id
      * @return the full SQL text of the migration file
@@ -65,22 +73,37 @@ public record Migration(int version, String description) {
                                 "Every registered migration version must have a SQL file for every supported dialect. " +
                                 "Verify that the file exists in fsm-jdbc/src/main/resources/" + path);
             }
-            return new String(in.readAllBytes(), StandardCharsets.UTF_8);
+            return normalizeLineEndings(new String(in.readAllBytes(), StandardCharsets.UTF_8));
         } catch (IOException e) {
             throw new MigrationException("Failed to read migration resource '" + path + "'", e);
         }
     }
 
     /**
-     * Computes the MD5 checksum of the given SQL text.
+     * Rewrites CRLF and lone CR line endings to {@code \n}.
+     *
+     * <p>Applied on load and again before hashing, so the checksum of a migration depends on its
+     * SQL and not on the platform that packaged the jar. Idempotent.
+     *
+     * @param sql the text to normalize
+     * @return the text with {@code \r\n} and bare {@code \r} replaced by {@code \n}
+     */
+    public static String normalizeLineEndings(String sql) {
+        return sql.replace("\r\n", "\n").replace('\r', '\n');
+    }
+
+    /**
+     * Computes the MD5 checksum of the given SQL text, after
+     * {@linkplain #normalizeLineEndings normalizing its line endings}.
      *
      * @param sql the SQL content to checksum
      * @return lowercase hex MD5 string, e.g. {@code "d41d8cd98f00b204e9800998ecf8427e"}
      */
+    @SuppressWarnings("java:S4790") // MD5 detects accidental drift, not tampering by an attacker
     public static String checksum(String sql) {
         try {
             MessageDigest md = MessageDigest.getInstance("MD5");
-            byte[] digest = md.digest(sql.getBytes(StandardCharsets.UTF_8));
+            byte[] digest = md.digest(normalizeLineEndings(sql).getBytes(StandardCharsets.UTF_8));
             return HexFormat.of().formatHex(digest);
         } catch (NoSuchAlgorithmException e) {
             throw new IllegalStateException("MD5 algorithm not available", e);

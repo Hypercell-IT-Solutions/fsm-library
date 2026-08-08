@@ -28,7 +28,9 @@ import java.util.*;
  *   <li><b>Applies</b> each migration version from {@link MigrationRegistry} that is not yet
  *       present in {@code fsm_schema_history}, in ascending order.</li>
  *   <li><b>Re-checks checksums</b> of already-applied versions. A mismatch warns by default;
- *       it hard-fails if {@code strictChecksum} is {@code true}.</li>
+ *       it hard-fails if {@code strictChecksum} is {@code true}. Checksums ignore line-ending
+ *       differences (see {@link Migration#normalizeLineEndings}), so the same commit built on
+ *       Windows and on Linux validates against the same database.</li>
  *   <li><b>Releases</b> the lock.</li>
  * </ol>
  *
@@ -442,7 +444,7 @@ public class SchemaMigrator {
                 throw new MigrationException(
                         "Required classpath resource not found: '" + path + "'");
             }
-            return new String(in.readAllBytes(), StandardCharsets.UTF_8);
+            return Migration.normalizeLineEndings(new String(in.readAllBytes(), StandardCharsets.UTF_8));
         } catch (IOException e) {
             throw new MigrationException("Failed to read classpath resource '" + path + "'", e);
         }
