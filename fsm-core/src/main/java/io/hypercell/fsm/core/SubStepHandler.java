@@ -42,17 +42,23 @@ public interface SubStepHandler<C> {
     }
 
     /**
-     * How failures of this sub-step should be handled.
+     * The <em>default</em> recovery behaviour for failures of this sub-step.
      * <p>
-     * Override to give this specific step its own recovery behaviour — it is the most specific
-     * level of the policy chain and wins over the state's and machine's policies. Returning
-     * {@code null} (the default) means "no opinion": the state policy is consulted next.
+     * Override when the failure semantics are intrinsic to the step itself rather than to the
+     * workflow hosting it — "this step reserves an external resource, so failing it commits
+     * nothing" is a property of the step, and travels with the class wherever it is registered.
+     * Returning {@code null} (the default) means "no opinion": the state policy is consulted next.
      * <pre>{@code
      * @Override
      * public FailurePolicy<SimSwapHelper> failurePolicy() {
      *     return FailurePolicy.always(FailureDisposition.REWIND);
      * }
      * }</pre>
+     * Whatever policy ends up attached to the registration occupies the sub-step level of the
+     * chain, which wins over the state's and the machine's policies. Because a handler is usually a
+     * shared, injected singleton, the state doing the registering may know better: a policy passed
+     * to {@code StateBuilder.subStep(handler, policy)} replaces the one declared here for that
+     * registration only.
      */
     default FailurePolicy<C> failurePolicy() {
         return null;

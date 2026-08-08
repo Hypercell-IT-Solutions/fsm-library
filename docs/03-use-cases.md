@@ -259,6 +259,22 @@ public class ChargePaymentStep implements SubStepHandler<OrderContext> {
 }
 ```
 
+A handler can also override `failurePolicy()` to declare how its own failures should be recovered
+(see [Failure dispositions](05-persistence-and-retry.md#where-policies-attach)). Keep that for
+semantics intrinsic to the step — a step that reserves an external resource commits nothing when it
+fails, no matter who registers it.
+
+Because the bean is a singleton, though, one declared policy would otherwise apply to every state
+that uses it. Pass a policy alongside the handler to override it for a single registration:
+
+```java
+state
+    .subStep(reserveStock)   // reserveStock.failurePolicy() applies
+    .subStep(chargePayment, FailurePolicy.always(FailureDisposition.MANUAL));
+```
+
+The policy you pass replaces the handler's; it is not chained in front of it.
+
 ### State as a class
 
 ```java

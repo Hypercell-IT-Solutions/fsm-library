@@ -119,9 +119,50 @@ public class StateBuilder<C> {
      * Register a sub-step from a handler class.
      * Equivalent to: .subStep(handler.name(), handler::execute), also picking up the handler's
      * {@link SubStepHandler#failurePolicy()} if it declares one.
+     * <p>
+     * Use {@link #subStep(SubStepHandler, FailurePolicy)} when this state disagrees with the
+     * handler's declared policy.
      */
     public StateBuilder<C> subStep(SubStepHandler<C> handler) {
         return subStep(handler.name(), handler::execute, handler.failurePolicy());
+    }
+
+    /**
+     * Register a sub-step from a handler class, overriding whatever failure policy the handler
+     * declares.
+     * <p>
+     * A {@link SubStepHandler} is typically a shared, injected singleton registered in more than one
+     * state, so the policy baked into the class cannot know what any individual registration needs.
+     * The policy given here <strong>replaces</strong> {@link SubStepHandler#failurePolicy()}
+     * outright — the handler's own policy is not consulted as a fallback. Everything downstream is
+     * unchanged: this policy is the sub-step level of the chain and still wins over the state's and
+     * the machine's.
+     * <pre>{@code
+     * // one handler bean, two states, two recovery behaviours
+     * .state("RESERVE")
+     *     .subStep(reserveMsisdnStep)                                     // handler's own policy
+     * .state("RETRY_RESERVE")
+     *     .subStep(reserveMsisdnStep, FailurePolicy.always(FailureDisposition.MANUAL))
+     * }</pre>
+     * To keep the handler's policy as a fallback instead of discarding it, chain explicitly — but
+     * only when the handler actually declares one, since {@link FailurePolicy#orElse} rejects
+     * {@code null}:
+     * <pre>{@code
+     * .subStep(step, myPolicy.orElse(step.failurePolicy()))
+     * }</pre>
+     * To discard the handler's policy and fall through to the state policy, pass a policy that
+     * always defers: {@code .subStep(step, f -> null)}.
+     *
+     * @param handler the sub-step implementation
+     * @param policy  the failure policy for this registration; must not be {@code null}
+     * @throws StateMachineConfigurationException if the policy is {@code null}, or the handler's
+     *                                            name is a duplicate or contains {@code ::}
+     */
+    public StateBuilder<C> subStep(SubStepHandler<C> handler, FailurePolicy<C> policy) {
+        if (policy == null) throw new StateMachineConfigurationException(
+                "failurePolicy must not be null for sub-step '" + handler.name()
+                        + "' in state '" + name + "'.");
+        return subStep(handler.name(), handler::execute, policy);
     }
 
     /**

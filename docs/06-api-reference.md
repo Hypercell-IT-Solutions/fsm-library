@@ -296,10 +296,12 @@ Class-based alternative to an inline lambda for sub-steps. Useful for Spring DI 
 String name()                              // stable snapshot key
 ActionResult execute(C context) throws Exception
 default Action<C> asAction()               // adapter for places that expect Action<C>
-default FailurePolicy<C> failurePolicy()   // null = no opinion; override to classify this step's failures
+default FailurePolicy<C> failurePolicy()   // null = no opinion; the step's *default* classification
 ```
 
-Register via `StateBuilder.subStep(SubStepHandler<C>)`, which picks up `failurePolicy()` automatically.
+Register via `StateBuilder.subStep(SubStepHandler<C>)`, which picks up `failurePolicy()`
+automatically, or `StateBuilder.subStep(SubStepHandler<C>, FailurePolicy<C>)` to replace it for one
+registration — useful when the same handler bean is registered in several states.
 
 ---
 
@@ -338,7 +340,8 @@ Returned by `StateMachineBuilder.state(String name)`.
 ```java
 StateBuilder<C> subStep(String name, Action<C> action)
 StateBuilder<C> subStep(String name, Action<C> action, FailurePolicy<C> policy)  // per-sub-step policy
-StateBuilder<C> subStep(SubStepHandler<C> handler)
+StateBuilder<C> subStep(SubStepHandler<C> handler)                              // uses handler.failurePolicy()
+StateBuilder<C> subStep(SubStepHandler<C> handler, FailurePolicy<C> policy)     // replaces it; policy must not be null
 StateBuilder<C> onEntry(Consumer<C> fn)          // composable: multiple calls stack
 StateBuilder<C> onExit(Consumer<C> fn)           // composable: multiple calls stack
 StateBuilder<C> failurePolicy(FailurePolicy<C> p) // classifies failures of this state's sub-steps
@@ -844,7 +847,9 @@ public interface FailurePolicy<C> {
 ```
 
 Attach via `StateMachineBuilder.failurePolicy(...)`, `StateBuilder.failurePolicy(...)`,
-`StateBuilder.subStep(name, action, policy)`, or by overriding `SubStepHandler.failurePolicy()`.
+`StateBuilder.subStep(name, action, policy)`, `StateBuilder.subStep(handler, policy)`, or by
+overriding `SubStepHandler.failurePolicy()`. The last two both land at the sub-step level; when
+both are present the one passed to `subStep` replaces the one the handler declares.
 
 Policies run synchronously on the execution thread while the failure is recorded. A policy that
 throws is treated as "no opinion" and logged.
