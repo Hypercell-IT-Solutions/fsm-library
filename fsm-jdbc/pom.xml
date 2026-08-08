@@ -8,7 +8,7 @@
     <parent>
         <groupId>net.hypercell</groupId>
         <artifactId>fsm-library</artifactId>
-        <version>1.0.0-RC4</version>
+        <version>1.0.0-RC5</version>
     </parent>
 
     <artifactId>fsm-jdbc</artifactId>
