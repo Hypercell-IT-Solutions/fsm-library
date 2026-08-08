@@ -189,6 +189,11 @@ sub-step policy  →  state policy  →  machine policy  →  RETRY
 That `null`-means-defer rule is what makes partial policies natural — a state-level policy can
 single out one sub-step and let everything else fall through.
 
+"Sub-step policy" means *the policy attached at the registration site if one was given, otherwise
+the one the sub-step's class declares* — see [Class-based sub-steps](#class-based-sub-steps) below.
+That choice is made once when the machine is built, so the chain the runtime walks is always these
+three levels.
+
 ```java
 // machine level — a rule that holds everywhere
 StateMachine.<OrderContext>define("order")
@@ -205,7 +210,45 @@ StateMachine.<OrderContext>define("order")
         .subStep("notify", ctx -> notify(ctx), FailurePolicy.always(FailureDisposition.MANUAL))
 ```
 
-Class-based sub-steps declare their own by overriding `SubStepHandler.failurePolicy()`.
+### Class-based sub-steps
+
+A `SubStepHandler` declares its default by overriding `failurePolicy()`. Do that when the failure
+semantics belong to the step itself rather than to the workflow around it — "this step reserves an
+external resource, so failing it commits nothing" is a property of the step, and should travel with
+the class wherever it is registered.
+
+```java
+@Component
+public class ReserveMsisdnStep implements SubStepHandler<SimSwapContext> {
+
+    @Override public String name() { return "reserve-msisdn"; }
+
+    @Override
+    public FailurePolicy<SimSwapContext> failurePolicy() {
+        return FailurePolicy.always(FailureDisposition.REWIND);
+    }
+    ...
+}
+```
+
+But a handler is usually a shared, injected singleton registered in more than one state, and the
+class cannot know what every registration needs. Pass a policy alongside the handler to override
+what it declares, for that registration only:
+
+```java
+.state("RESERVE")
+    .subStep(reserveMsisdnStep)                                     // handler's own REWIND
+.state("RETRY_RESERVE")
+    .subStep(reserveMsisdnStep, FailurePolicy.always(FailureDisposition.MANUAL))
+```
+
+The overriding policy **replaces** the handler's — it is not chained in front of it. To keep the
+handler's as a fallback, chain explicitly with `.subStep(step, myPolicy.orElse(step.failurePolicy()))`
+(only when the handler actually declares one — `orElse` rejects `null`). To drop the handler's
+policy and fall through to the state's, pass one that always defers: `.subStep(step, f -> null)`.
+
+`null` is not accepted as the policy argument — you are explicitly asking for an override, so you
+must supply one; use the single-argument overload if you want the handler's default.
 
 ### Built-in policies
 

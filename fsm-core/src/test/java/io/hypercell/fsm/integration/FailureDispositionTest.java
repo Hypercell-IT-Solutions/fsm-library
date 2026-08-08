@@ -4,6 +4,7 @@ import io.hypercell.fsm.OrderContext;
 import io.hypercell.fsm.StateMachine;
 import io.hypercell.fsm.core.ActionResult;
 import io.hypercell.fsm.core.StateMachineDefinition;
+import io.hypercell.fsm.core.SubStepHandler;
 import io.hypercell.fsm.exception.ExecutionAbortedException;
 import io.hypercell.fsm.exception.IllegalTriggerStateException;
 import io.hypercell.fsm.failure.FailureDisposition;
@@ -587,5 +588,182 @@ class FailureDispositionTest {
                 .as("the original exception survives to the caller")
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessage("boom");
+    }
+
+    // ------------------------------------------------ class-based sub-steps (SubStepHandler)
+
+    /**
+     * Stands in for the reusable, injected sub-step class: one instance, registered in more than
+     * one state, declaring its own default policy. It always fails, so every registration of it
+     * exercises the policy chain.
+     */
+    private static final class ReserveResourceStep implements SubStepHandler<OrderContext> {
+        private final FailurePolicy<OrderContext> declared;
+        private final AtomicInteger runs = new AtomicInteger();
+
+        ReserveResourceStep(FailurePolicy<OrderContext> declared) {
+            this.declared = declared;
+        }
+
+        @Override
+        public String name() {
+            return "reserve-resource";
+        }
+
+        @Override
+        public ActionResult execute(OrderContext ctx) {
+            runs.incrementAndGet();
+            throw new IllegalStateException("resource service down");
+        }
+
+        @Override
+        public FailurePolicy<OrderContext> failurePolicy() {
+            return declared;
+        }
+    }
+
+    /**
+     * The single-argument handler overload picks up {@link SubStepHandler#failurePolicy()}, and
+     * that policy occupies the sub-step level of the chain — so it beats the state's.
+     */
+    @Test
+    void handlerPolicy_isUsedByTheHandlerOverload() {
+        InMemorySnapshotRepository repo = InMemorySnapshotRepository.create();
+        ReserveResourceStep step =
+                new ReserveResourceStep(FailurePolicy.always(FailureDisposition.MANUAL));
+
+        StateMachineDefinition<OrderContext> definition = StateMachine.<OrderContext>define("handler-policy")
+                .initial("PENDING")
+                .snapshotRepository(repo)
+                .contextLoader(OrderContext::new)
+                .state("PENDING")
+                .on("GO").to("PROCESSING").end()
+                .and()
+                .state("PROCESSING")
+                .failurePolicy(FailurePolicy.always(FailureDisposition.ABORT))
+                .subStep(step)
+                .and()
+                .build();
+
+        StateMachineManager<OrderContext> manager = StateMachine.manager(definition, repo);
+
+        manager.initialize("handler-1");
+        triggerExpectingFailure(manager, "handler-1", "GO");
+
+        ExecutionSnapshot snapshot = repo.load("handler-1").orElseThrow();
+        assertThat(snapshot.getFailureDisposition())
+                .as("the handler's own policy beats the state's")
+                .isEqualTo(FailureDisposition.MANUAL);
+        assertThat(snapshot.getFailedSubStepName())
+                .as("the handler's name() is the snapshot key")
+                .isEqualTo("reserve-resource");
+        assertThat(step.runs.get()).isEqualTo(1);
+    }
+
+    /**
+     * A policy passed at the registration site replaces the handler's declared one outright — it
+     * is not chained in front of it.
+     */
+    @Test
+    void registrationPolicy_overridesHandlerPolicy() {
+        InMemorySnapshotRepository repo = InMemorySnapshotRepository.create();
+        ReserveResourceStep step =
+                new ReserveResourceStep(FailurePolicy.always(FailureDisposition.MANUAL));
+
+        StateMachineDefinition<OrderContext> definition = StateMachine.<OrderContext>define("handler-override")
+                .initial("PENDING")
+                .snapshotRepository(repo)
+                .contextLoader(OrderContext::new)
+                .state("PENDING")
+                .on("GO").to("PROCESSING").end()
+                .and()
+                .state("PROCESSING")
+                .failurePolicy(FailurePolicy.always(FailureDisposition.RETRY))
+                .subStep(step, FailurePolicy.always(FailureDisposition.ABORT))
+                .and()
+                .build();
+
+        StateMachineManager<OrderContext> manager = StateMachine.manager(definition, repo);
+
+        manager.initialize("override-1");
+        triggerExpectingFailure(manager, "override-1", "GO");
+
+        assertThat(repo.load("override-1").orElseThrow().getFailureDisposition())
+                .as("the registration-site policy wins over both the handler's and the state's")
+                .isEqualTo(FailureDisposition.ABORT);
+    }
+
+    /**
+     * The handler's policy really is discarded, not kept as a fallback: an overriding policy that
+     * defers falls through to the <em>state</em>, skipping what the handler declared.
+     */
+    @Test
+    void registrationPolicy_thatDefers_fallsThroughToStatePolicy() {
+        InMemorySnapshotRepository repo = InMemorySnapshotRepository.create();
+        ReserveResourceStep step =
+                new ReserveResourceStep(FailurePolicy.always(FailureDisposition.ABORT));
+
+        StateMachineDefinition<OrderContext> definition = StateMachine.<OrderContext>define("handler-suppress")
+                .initial("PENDING")
+                .snapshotRepository(repo)
+                .contextLoader(OrderContext::new)
+                .state("PENDING")
+                .on("GO").to("PROCESSING").end()
+                .and()
+                .state("PROCESSING")
+                .failurePolicy(FailurePolicy.always(FailureDisposition.MANUAL))
+                .subStep(step, f -> null)
+                .and()
+                .build();
+
+        StateMachineManager<OrderContext> manager = StateMachine.manager(definition, repo);
+
+        manager.initialize("suppress-1");
+        triggerExpectingFailure(manager, "suppress-1", "GO");
+
+        assertThat(repo.load("suppress-1").orElseThrow().getFailureDisposition())
+                .as("the handler's ABORT is gone, so the state policy decides")
+                .isEqualTo(FailureDisposition.MANUAL);
+    }
+
+    /**
+     * The motivating scenario: one shared handler instance, two states, two recovery behaviours.
+     * Without the overriding overload the handler's single declared policy would apply to both.
+     */
+    @Test
+    void sameHandlerInTwoStates_getsDifferentDispositions() {
+        InMemorySnapshotRepository repo = InMemorySnapshotRepository.create();
+        ReserveResourceStep step =
+                new ReserveResourceStep(FailurePolicy.always(FailureDisposition.MANUAL));
+
+        StateMachineDefinition<OrderContext> definition = StateMachine.<OrderContext>define("handler-shared")
+                .initial("PENDING")
+                .snapshotRepository(repo)
+                .contextLoader(OrderContext::new)
+                .state("PENDING")
+                .on("DEFAULT").to("USES_DECLARED").end()
+                .on("OVERRIDDEN").to("USES_OVERRIDE").end()
+                .and()
+                .state("USES_DECLARED")
+                .subStep(step)
+                .and()
+                .state("USES_OVERRIDE")
+                .subStep(step, FailurePolicy.always(FailureDisposition.ABORT))
+                .and()
+                .build();
+
+        StateMachineManager<OrderContext> manager = StateMachine.manager(definition, repo);
+
+        manager.initialize("shared-a");
+        triggerExpectingFailure(manager, "shared-a", "DEFAULT");
+        assertThat(repo.load("shared-a").orElseThrow().getFailureDisposition())
+                .isEqualTo(FailureDisposition.MANUAL);
+
+        manager.initialize("shared-b");
+        triggerExpectingFailure(manager, "shared-b", "OVERRIDDEN");
+        assertThat(repo.load("shared-b").orElseThrow().getFailureDisposition())
+                .isEqualTo(FailureDisposition.ABORT);
+
+        assertThat(step.runs.get()).as("one instance served both states").isEqualTo(2);
     }
 }
